@@ -11,5 +11,5 @@ runs:
   steps:
       - name: Test and Build Extension
         working-directory: ./extensions
-        run: ./gradlew :${{ inputs.extension }}:test :${{ inputs.extension }}:buildRelease --scan --stacktrace --warning-mode all
+        run: ./gradlew :${{ inputs.extension }}:test :${{ inputs.extension }}:buildRelease --no-configuration-cache --stacktrace --warning-mode all
         shell: bash

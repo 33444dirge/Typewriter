@@ -28,7 +28,7 @@
 - 中文消息、启动命令保留标签、本地真实 Folia 26.2 API 和编译输入。上游通用目标为 Java 21，本分支继续使用 Java 25。
 - 默认仍排除 Citizens、SuperiorSkyblock、RPGRegions 三个可选扩展；它们的上游源码在 Git 历史中保留。上游文档站、机器人、设计文件等未从分支历史删除，本地使用 sparse checkout 只展开运行相关目录。
 
-`app/` 当前无相对上游的源码差异。引擎和扩展使用上游为合并父提交，后续可以直接 `git fetch upstream` 后合并 `upstream/develop`，无需再把归档源码当作无历史目录。
+`app/lib/` 与素材当前无相对上游的源码差异。Flutter SDK 更新了锁文件中的 `meta`、`vector_math` 两项依赖，并在静态分析配置中排除构建及平台目录。引擎和扩展使用上游为合并父提交，后续可以直接 `git fetch upstream` 后合并 `upstream/develop`，无需再把归档源码当作无历史目录。
 
 ## 构建
 
@@ -60,3 +60,32 @@ extensions\gradlew.bat -p extensions build --no-configuration-cache --console=pl
 1. 在 beta-177 基线建立 `jiujiu`，提交本地已维护的 Folia / GUI / 主线适配。
 2. 合并 `upstream/develop` 的 `94ec4238d95a5a65ce54270acf036800ea302085`，逐处整合冲突。
 3. 补齐版本标记、依赖清单、构建与差异说明，构建通过后推送 `HEAD:refs/heads/jiujiu`。
+
+## 验证结果
+
+验证日期：2026-11-21（Asia/Hong_Kong）。
+
+| 范围 | 测试数 | 失败 / 错误 |
+| --- | ---: | ---: |
+| engine | 225 | 0 / 0 |
+| extensions | 157 | 0 / 0 |
+| module-plugin | 0 | 0 / 0 |
+
+引擎、模块构建工具和所有启用扩展的 Gradle build 均通过；模块构建工具包含 Gradle 插件配置校验。
+
+Flutter pub get、静态检查、44 项测试和 release web 构建通过。静态检查沿用上游 CI 的 `--no-fatal-warnings --no-fatal-infos`，有 1 项既有 analyzer legacy plugin 弃用警告，0 个错误。
+
+发布主包从当前 `app/build/web` 收集网页资源，并核对包含 `26.1–26.3` 新增素材。主包和扩展的清单版本使用同一 `0.9.0-jiujiu-folia26.2.1` 引擎版本。
+
+| 产物 | SHA256 |
+| --- | --- |
+| `jars/engine/Typewriter-0.9.0-jiujiu-folia26.2.1.jar` | `cf8a8cefd950b1ad983def9a42077d47f1342f7f7eba0fd5db06d82a533f98c7` |
+| `extensions/BasicExtension/build/libs/BasicExtension-0.9.0-jiujiu-folia26.2.1-all.jar` | `53430fbcad34f80e3f1ad737662bd5f2f234c898c317bcadcca85627382d7e19` |
+| `extensions/EntityExtension/build/libs/EntityExtension-0.9.0-jiujiu-folia26.2.1-all.jar` | `499bdf784dcf1bb5d273daa036aa4e1d82984ff7d68f88053b78805570eefb7c` |
+| `extensions/FancyNpcsExtension/build/libs/FancyNpcsExtension-0.9.0-jiujiu-folia26.2.1-all.jar` | `e8a574b22840a4967c7d525ecb24ccdfa199c66c6a291eacd495198ee6f6c2be` |
+| `extensions/JiuJiuQuestExtension/build/libs/JiuJiuQuestExtension-0.9.0-jiujiu-folia26.2.1-all.jar` | `e589f7debcb91364631b98029029a7cf6cf2bf9387ec83162b9fb5d8a821798c` |
+| `extensions/MythicMobsExtension/build/libs/MythicMobsExtension-0.9.0-jiujiu-folia26.2.1-all.jar` | `e92783dba99579dbcdf04ab80ca40da990a33ee2751102b364aa3e5e3ec22d6d` |
+| `extensions/QuestExtension/build/libs/QuestExtension-0.9.0-jiujiu-folia26.2.1-all.jar` | `8a0641ee3d084f08db0c461a53fb0dc563ada0350f8fa4ffe008aec08b07c0e4` |
+| `extensions/RoadNetworkExtension/build/libs/RoadNetworkExtension-0.9.0-jiujiu-folia26.2.1-all.jar` | `9c2eeb0541f0a7c47e9c3fd39b67f3dcef43b941a0ed5cad7f8aab499a222cb2` |
+| `extensions/VaultExtension/build/libs/VaultExtension-0.9.0-jiujiu-folia26.2.1-all.jar` | `b37a308eddbee465ed9463be69cdcf619ed6494464d71b69ab88c85b3a7250a5` |
+| `extensions/WorldGuardExtension/build/libs/WorldGuardExtension-0.9.0-jiujiu-folia26.2.1-all.jar` | `3265ec3256a45e9c023378eefeb12ddbd0027d3f1de81aa4d18826afb8049939` |
