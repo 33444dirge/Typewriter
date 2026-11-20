@@ -45,20 +45,17 @@ class SetFakeBlockDisplay(
     private val blocks = ConcurrentHashMap<UUID, PlayerBlock>()
 
     override fun tick() {
-        blocks.forEach { (playerId, state) ->
-            val player = server.getPlayer(playerId) ?: return@forEach
+        forEachPlayer { player ->
+            val playerId = player.uniqueId
+            val state = blocks[playerId] ?: return@forEachPlayer
             val context = player.interactionContext
             val currentPosition = position.get(player, context)
             val currentMaterial = block.get(player, context)
-            val realBlock = currentPosition.toBukkitLocation().block.type
-
             if (currentPosition != state.position || currentMaterial != state.material) {
-                sendBlockChange(player, state.position, state.position.toBukkitLocation().block.type)
-                sendBlockChange(player, currentPosition, currentMaterial)
                 blocks[playerId] = PlayerBlock(currentPosition, currentMaterial)
-            } else if (realBlock != currentMaterial) {
-                sendBlockChange(player, currentPosition, currentMaterial)
+                if (currentPosition != state.position) restoreBlock(player, state.position)
             }
+            sendBlockChange(player, currentPosition, currentMaterial)
         }
     }
 
@@ -71,10 +68,23 @@ class SetFakeBlockDisplay(
     }
 
     override fun onPlayerRemove(player: Player) {
-        blocks.remove(player.uniqueId)?.let { sendBlockChange(player, it.position, it.position.toBukkitLocation().block.type) }
+        blocks.remove(player.uniqueId)?.let { restoreBlock(player, it.position) }
+    }
+
+    private fun restoreBlock(player: Player, position: Position) {
+        val location = position.toBukkitLocation()
+        foliaScheduler.atRegion(location, {
+            val data = location.block.blockData.clone()
+            foliaScheduler.atEntity(player, {
+                if (blocks[player.uniqueId]?.position != position && player.world.uid == location.world?.uid) {
+                    player.sendBlockChange(location, data)
+                }
+            }, null, 1L)
+        }, 1L)
     }
 
     private fun sendBlockChange(player: Player, position: Position, material: Material) {
+        if (player.world.uid != position.toBukkitLocation().world?.uid) return
         WrapperPlayServerBlockChange(
             position.toPacketVector3i(),
             SpigotConversionUtil.fromBukkitBlockData(material.createBlockData())

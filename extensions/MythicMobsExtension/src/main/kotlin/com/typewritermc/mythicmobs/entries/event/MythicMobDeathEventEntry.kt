@@ -11,6 +11,7 @@ import com.typewritermc.core.interaction.context
 import com.typewritermc.engine.paper.entry.TriggerableEntry
 import com.typewritermc.engine.paper.entry.entries.EventEntry
 import com.typewritermc.engine.paper.entry.triggerAllFor
+import com.typewritermc.engine.paper.utils.foliaScheduler
 import io.lumine.mythic.bukkit.events.MythicMobDeathEvent
 import org.bukkit.entity.Player
 
@@ -35,7 +36,9 @@ class MythicMobDeathEventEntry(
 @EntryListener(MythicMobDeathEventEntry::class)
 fun onMobDeath(event: MythicMobDeathEvent, query: Query<MythicMobDeathEventEntry>) {
     val player = event.killer as? Player ?: return
-    query.findWhere {
-        it.mobName.toRegex(RegexOption.IGNORE_CASE).matches(event.mobType.internalName)
-    }.triggerAllFor(player, context())
+    val type = event.mob.mobType
+    val entries = query.findWhere {
+        it.mobName.toRegex(RegexOption.IGNORE_CASE).matches(type)
+    }.toList()
+    foliaScheduler.atEntity(player, { entries.triggerAllFor(player, context()) }, null, 1L)
 }

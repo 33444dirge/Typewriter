@@ -3,6 +3,10 @@
 package com.typewritermc.engine.paper.command.dsl
 
 import com.typewritermc.core.entries.Entry
+import com.typewritermc.core.utils.launch
+import com.typewritermc.engine.paper.command.CommandMessage
+import com.typewritermc.engine.paper.utils.entityDispatcher
+import com.typewritermc.engine.paper.utils.foliaScheduler
 import com.typewritermc.engine.paper.utils.msg
 import com.typewritermc.loader.Extension
 import io.papermc.paper.command.brigadier.CommandSourceStack
@@ -40,7 +44,7 @@ fun CommandTree.executePlayerOrTarget(block: ExecutionContext<CommandSourceStack
     playersResolver("target") { resolver ->
         executes {
             resolver().resolve(source).forEach { player ->
-                block(this, player)
+                executeOwned(player, block)
             }
         }
     }
@@ -52,15 +56,23 @@ fun CommandTree.executePlayerOrTarget(block: ExecutionContext<CommandSourceStack
 fun CommandTree.executePlayer(block: ExecutionContext<CommandSourceStack>.(Player) -> Unit) {
     executes {
         (source.executor as? Player)?.let { player ->
-            block(this, player)
+            executeOwned(player, block)
             return@executes
         }
         (sender as? Player)?.let { player ->
-            block(this, player)
+            executeOwned(player, block)
             return@executes
         }
-        sender.msg("You must be a player to execute this command!")
+        sender.msg(CommandMessage.PLAYER_ONLY.text())
     }
+}
+
+private fun ExecutionContext<CommandSourceStack>.executeOwned(
+    player: Player,
+    block: ExecutionContext<CommandSourceStack>.(Player) -> Unit,
+) {
+    if (foliaScheduler.owns(player)) block(this, player)
+    else player.entityDispatcher.launch { block(this@executeOwned, player) }
 }
 
 inline fun <reified E : Entry> CommandTree.entry(

@@ -100,4 +100,9 @@ private class PiglinBruteEntity(player: Player) : WrapperFakeEntity(
         rideableSitting.dispose()
         super.dispose()
     }
+
+    override fun retireResources() {
+        rideableSitting.retireResources()
+        super.retireResources()
+    }
 }

@@ -14,6 +14,10 @@ import com.typewritermc.engine.paper.extensions.placeholderapi.parsePlaceholders
 import com.typewritermc.engine.paper.interaction.Confirmation
 import com.typewritermc.engine.paper.interaction.awaitConfirmation
 import com.typewritermc.engine.paper.interaction.chatHistory
+import com.typewritermc.engine.paper.interaction.acceptActionBarMessage
+import com.typewritermc.engine.paper.events.DialogueDisplayEvent
+import com.typewritermc.engine.paper.events.DialogueInputEvent
+import com.typewritermc.engine.paper.events.signalDialogueInput
 import com.typewritermc.engine.paper.snippets.snippet
 import com.typewritermc.engine.paper.utils.*
 import net.kyori.adventure.text.Component
@@ -58,6 +62,12 @@ private val delayOptionShow: Int by snippet(
     "The delay in milliseconds between each option being shown."
 )
 
+private val overlayRefreshMillis: Int by snippet(
+    "dialogue.option.overlayRefreshMillis",
+    500,
+    "外置选项界面的刷新检查间隔，单位毫秒，范围100～1000；默认500。保持底框持续可见，等待玩家确认或退出。"
+)
+
 class JavaOptionDialogueDialogueMessenger(player: Player, context: InteractionContext, entry: OptionDialogueEntry) :
     DialogueMessenger<OptionDialogueEntry>(player, context, entry) {
 
@@ -81,6 +91,8 @@ class JavaOptionDialogueDialogueMessenger(player: Player, context: InteractionCo
     private var totalDuration = Duration.ZERO
 
     private var completedAnimation = false
+    private var overlayActive = false
+    private var nextOverlayRefreshAt = Duration.ZERO
 
     override val eventTriggers: List<EventTrigger>
         get() = entry.eventTriggers + (selected?.eventTriggers ?: emptyList())
@@ -118,6 +130,7 @@ class JavaOptionDialogueDialogueMessenger(player: Player, context: InteractionCo
     @EventHandler
     private fun onPlayerItemHeld(event: PlayerItemHeldEvent) {
         if (event.player.uniqueId != player.uniqueId) return
+        if (usableOptions.isEmpty() || state != MessengerState.RUNNING) return
         val curSlot = event.previousSlot
         val newSlot = event.newSlot
         val dif = loopingDistance(curSlot, newSlot, 8)
@@ -126,6 +139,7 @@ class JavaOptionDialogueDialogueMessenger(player: Player, context: InteractionCo
         var newIndex = (index + dif) % usableOptions.size
         while (newIndex < 0) newIndex += usableOptions.size
         selectedIndex = newIndex
+        if (newIndex != index) player.signalDialogueInput(entry.id, DialogueInputEvent.Action.SELECT)
         displayMessage(playTime)
     }
 
@@ -153,9 +167,12 @@ class JavaOptionDialogueDialogueMessenger(player: Player, context: InteractionCo
             return
         }
 
-        if (playTime.toTicks() % 100 > 0 && completedAnimation && !isFirst && !forceSend) {
-            // Only update periodically to avoid spamming the player
-            return
+        if (completedAnimation && !isFirst && !forceSend) {
+            if (overlayActive) {
+                if (playTime < nextOverlayRefreshAt) return
+            } else if (playTime.toTicks() % 100 > 0) {
+                return
+            }
         }
         displayMessage(playTime)
     }
@@ -167,6 +184,34 @@ class JavaOptionDialogueDialogueMessenger(player: Player, context: InteractionCo
             if (typeDuration.isZero) {
                 1.0
             } else typingDurationType.calculatePercentage(playTime, typeDuration, rawText)
+
+        if (DialogueDisplayEvent.getHandlerList().registeredListeners.isNotEmpty()) {
+            val page = dialogueChoiceWindow(usableOptions, selectedIndex)
+            val typingDuration = typingDurationType.totalDuration(rawText, typeDuration)
+            val shown = ((playTime - typingDuration).toMillis() / delayOptionShow.coerceAtLeast(1)).toInt().coerceAtLeast(0)
+            val choices = page.choices.take(shown).map {
+                it.text.get(player).parsePlaceholders(player).asMini(player)
+            }
+            val request = DialogueDisplayEvent(
+                player, entry.id, speakerDisplayName.asMini(player),
+                parsedText.asMini(player).splitPercentage(typePercentage), choices,
+                page.selectedIndex, usableOptions.size, page.offset,
+                "<confirmation_key>".asMini(player), animationComplete, false,
+            )
+            request.callEvent()
+            request.actionBarMessage?.let {
+                player.acceptActionBarMessage(it)
+                player.sendActionBar(it)
+            }
+            if (request.isCancelled) {
+                overlayActive = true
+                nextOverlayRefreshAt = playTime.plusMillis(overlayRefreshMillis.coerceIn(100, 1000).toLong())
+                completedAnimation = animationComplete
+                return
+            }
+        }
+
+        overlayActive = false
 
         val resultingLines = rawText.limitLineLength(optionMaxLineLength).lineCount
         val text = parsedText.asPartialFormattedMini(

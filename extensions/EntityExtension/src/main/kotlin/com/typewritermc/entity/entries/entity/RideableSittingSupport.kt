@@ -82,6 +82,13 @@ class RideableSittingSupport(
     /** Call from the entity's own dispose, so that the seat does not outlive it. */
     fun dispose() = unsit()
 
+    /** Releases a retired viewer's packet seat without querying the viewer or emitting packets. */
+    fun retireResources() {
+        val previous = sitEntity
+        sitEntity = null
+        previous?.releaseWithoutViewer()
+    }
+
     private fun sit(poseLocation: PositionProperty?) {
         val loc = poseLocation ?: location() ?: return
         if (sitEntity != null) return

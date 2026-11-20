@@ -69,9 +69,19 @@ class ChildActivityHolder<Key : Any, Context : ActivityContext>(
     }
 
     fun dispose() {
-        children.values.forEach { it.dispose() }
+        val previous = children.values.toList()
         children.clear()
+        active = IdleActivity(currentPosition)
         activeKey = null
+        var failure: Throwable? = null
+        previous.forEach {
+            try {
+                it.dispose()
+            } catch (error: Throwable) {
+                if (failure == null) failure = error else failure.addSuppressed(error)
+            }
+        }
+        failure?.let { throw it }
     }
 }
 

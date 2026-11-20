@@ -33,6 +33,9 @@ import com.typewritermc.engine.paper.interaction.interceptPackets
 import com.typewritermc.engine.paper.utils.toBukkitLocation
 import com.typewritermc.engine.paper.utils.toCoordinate
 import com.typewritermc.engine.paper.utils.toWorld
+import com.typewritermc.engine.paper.utils.foliaScheduler
+import com.typewritermc.engine.paper.utils.playStepSoundAt
+import kotlinx.coroutines.future.await
 import com.typewritermc.entity.entries.data.minecraft.*
 import com.typewritermc.entity.entries.data.minecraft.living.DamagedProperty
 import com.typewritermc.entity.entries.data.minecraft.living.EquipmentProperty
@@ -231,8 +234,8 @@ class EntityCinematicAction(
 
     private fun playStepSound() {
         val location = entity?.property<PositionProperty>() ?: return
-        val sound = location.toBukkitLocation().block.blockData.soundGroup.stepSound
-        player.playSound(location.toBukkitLocation(), sound, SoundCategory.NEUTRAL, 0.4f, 1.0f)
+        val expected = entity
+        player.playStepSoundAt(location.toBukkitLocation()) { entity === expected }
     }
 
 
@@ -467,7 +470,17 @@ class EntityCinematicRecording(
     }
 
     override fun applyState(value: EntityFrame) {
-        value.location?.let { player.teleport(it.toBukkitLocation(player.world)) }
+        value.location?.let { foliaScheduler.teleport(player, it.toBukkitLocation(player.world)) }
+        applyFrameProperties(value)
+    }
+
+    override suspend fun applyStateAsync(value: EntityFrame) {
+        val target = value.location?.toBukkitLocation(player.world)
+        if (target != null && !foliaScheduler.teleport(player, target).await()) return
+        applyFrameProperties(value)
+    }
+
+    private fun applyFrameProperties(value: EntityFrame) {
         value.pose?.let {
             player.pose = it.toBukkitPose()
             player.isGliding = it == EntityPose.SWIMMING

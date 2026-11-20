@@ -13,14 +13,24 @@ class Timeout(
     private val invoker: () -> Unit,
     private val immediateRunnable: Runnable? = null,
 ) : KoinComponent {
-    private var job: Job? = null
+    private class Pending { var job: Job? = null }
+    private val lock = Any()
+    private var pending: Pending? = null
     operator fun invoke() {
         immediateRunnable?.run()
-        if (job == null) {
-            job = Dispatchers.UntickedAsync.launch {
+        synchronized(lock) {
+            if (pending != null) return
+            val token = Pending()
+            pending = token
+            token.job = Dispatchers.UntickedAsync.launch {
                 delay(duration)
-                job = null
-                invoker()
+                val ready = synchronized(lock) {
+                    if (pending !== token) false else {
+                        pending = null
+                        true
+                    }
+                }
+                if (ready) invoker()
             }
         }
     }
@@ -31,7 +41,7 @@ class Timeout(
     }
 
     fun cancel() {
-        job?.cancel()
-        job = null
+        val previous = synchronized(lock) { pending.also { pending = null } }
+        previous?.job?.cancel()
     }
 }

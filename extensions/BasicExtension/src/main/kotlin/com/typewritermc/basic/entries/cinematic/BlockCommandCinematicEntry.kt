@@ -1,5 +1,7 @@
 package com.typewritermc.basic.entries.cinematic
 
+import com.typewritermc.engine.paper.utils.entityDispatcher
+
 import com.github.retrooper.packetevents.protocol.packettype.PacketType
 import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientChatCommand
 import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientChatCommandUnsigned
@@ -85,7 +87,7 @@ class BlockCommandCinematicAction(
         bundle?.cancel()
         bundle = null
         if (ranCommands.isNotEmpty()) {
-            Dispatchers.Sync.switchContext {
+            player.entityDispatcher.switchContext {
                 ranCommands.forEach {
                     player.performCommand(it)
                 }

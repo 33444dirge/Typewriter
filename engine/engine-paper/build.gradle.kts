@@ -7,6 +7,10 @@ plugins {
     id("io.papermc.hangar-publish-plugin") version "0.1.4"
 }
 
+configurations.named("testImplementation") {
+    extendsFrom(configurations.compileOnly.get())
+}
+
 repositories {
     mavenCentral()
     // Floodgate & Geyser
@@ -48,9 +52,14 @@ repositories {
 }
 
 dependencies {
-    val paperVersion = "1.21.11-R0.1-SNAPSHOT"
-//    val paperVersion = "26.2.build.34-alpha"
-    compileOnlyApi("io.papermc.paper:paper-api:$paperVersion")
+    compileOnlyApi(files("../../compile-libs/shiroha-api-26.2-SNAPSHOT.jar"))
+    compileOnlyApi("com.google.guava:guava:33.6.0-jre")
+    compileOnlyApi("org.joml:joml:1.10.8")
+    compileOnlyApi("org.yaml:snakeyaml:2.6")
+    compileOnlyApi(files("../../compile-libs/bungeecord-chat.jar"))
+    compileOnlyApi(files("../../compile-libs/brigadier-1.3.10.jar"))
+    compileOnlyApi("it.unimi.dsi:fastutil:8.5.18")
+    compileOnly("org.apache.maven.resolver:maven-resolver-api:1.9.18")
 
     api(project(":engine-core"))
     api(project(":engine-loader"))
@@ -58,8 +67,8 @@ dependencies {
     compileOnlyApi("com.corundumstudio.socketio:netty-socketio:1.7.19") // Keep this on a lower version as the newer version breaks the ping
 
     api("me.tofaa2:spigot:3.3.6-SNAPSHOT")
-    compileOnlyApi("com.github.shynixn.mccoroutine:mccoroutine-bukkit-api:2.22.0")
-    compileOnlyApi("com.github.shynixn.mccoroutine:mccoroutine-bukkit-core:2.22.0")
+    compileOnlyApi("com.github.shynixn.mccoroutine:mccoroutine-folia-api:2.22.0")
+    compileOnlyApi("com.github.shynixn.mccoroutine:mccoroutine-folia-core:2.22.0")
 
     // Doesn't want to load properly using the spigot api.
     compileOnlyApi("io.ktor:ktor-server-core-jvm:2.3.13")
@@ -67,25 +76,30 @@ dependencies {
     compileOnlyApi("org.jetbrains.kotlinx:kotlinx-serialization-core:1.11.0")
     compileOnlyApi("org.bstats:bstats-bukkit:3.2.1")
 
-    val adventureVersion = "5.1.1"
+    val adventureVersion = "5.2.0"
     compileOnlyApi("net.kyori:adventure-api:$adventureVersion")
     compileOnlyApi("net.kyori:adventure-text-minimessage:$adventureVersion")
     compileOnlyApi("net.kyori:adventure-text-serializer-plain:$adventureVersion")
     compileOnlyApi("net.kyori:adventure-text-serializer-legacy:$adventureVersion")
     compileOnlyApi("net.kyori:adventure-text-serializer-gson:$adventureVersion")
+    compileOnlyApi("net.kyori:adventure-text-logger-slf4j:$adventureVersion")
+    compileOnlyApi("org.apache.logging.log4j:log4j-api:2.26.0")
 
     compileOnlyApi("com.github.retrooper:packetevents-api:2.13.0")
     compileOnlyApi("com.github.retrooper:packetevents-spigot:2.13.0")
 
-    compileOnly("me.clip:placeholderapi:2.12.2")
+    compileOnly(files("../../compile-libs/placeholderapi-2.12.2.jar"))
     compileOnlyApi("org.geysermc.geyser:api:2.9.5-SNAPSHOT")
     compileOnlyApi("org.geysermc.floodgate:api:2.2.5-SNAPSHOT")
 
-    testImplementation("io.papermc.paper:paper-api:$paperVersion")
-    testImplementation("org.mockbukkit.mockbukkit:mockbukkit-v1.21:4.108.0")
+    testImplementation(files("../../compile-libs/shiroha-api-26.2-SNAPSHOT.jar"))
 }
 
 tasks.withType<ShadowJar> {
+    manifest.attributes["Typewriter-Connection-Revision"] = "null-player-guard-20261108-1"
+    manifest.attributes["Typewriter-Dialogue-Revision"] = "external-overlay-20261108-1"
+    manifest.attributes["Typewriter-Dialogue-Input-Revision"] = "dialogue-input-sounds-20261108-1"
+    manifest.attributes["Typewriter-Interaction-Revision"] = "sneak-exit-20261108-1"
     minimize {
         exclude("kotlin/**")
         exclude("org/intellij/**")
@@ -108,8 +122,13 @@ tasks.register<Copy>("buildAndMove") {
 tasks.register<Jar>("buildRelease") {
     dependsOn(tasks.shadowJar)
     from(zipTree(tasks.shadowJar.flatMap { it.archiveFile }))
-    from("../../app/build/web") {
+    val compiledPanel = file("../../app/build/web")
+    val panelResources = if (compiledPanel.resolve("index.html").isFile) compiledPanel else file("../../web-assets")
+    from(panelResources) {
         into("web")
+    }
+    doFirst {
+        check(panelResources.resolve("index.html").isFile) { "Missing compiled web panel resources" }
     }
     group = "build"
     description = "Builds the jar including the flutter web panel"
@@ -119,12 +138,15 @@ tasks.register<Jar>("buildRelease") {
     archiveFileName = "Typewriter-${project.version}.jar"
     destinationDirectory.set(file("../../jars/engine"))
     manifest.from(tasks.shadowJar.get().manifest)
+    manifest.attributes("Typewriter-Localization-Revision" to "zh-CN-20261108-1")
+    manifest.attributes("Typewriter-Performance-Revision" to "bounded-resources-20261108-1")
 }
 
 fun executeGitCommand(vararg command: String): String {
     return providers.exec {
         commandLine("git", *command)
-    }.standardOutput.asText.get().trim()
+        isIgnoreExitValue = true
+    }.standardOutput.asText.get().trim().ifEmpty { "Typewriter ${project.version} source build" }
 }
 
 fun latestCommitMessage(): String {
@@ -179,7 +201,7 @@ paperPluginYaml {
     main = "com.typewritermc.engine.paper.TypewriterPaperPlugin"
     apiVersion = "1.21.3"
 
-    foliaSupported = false
+    foliaSupported = true
 
     dependencies {
         server("packetevents", load = PaperPluginYaml.Load.BEFORE, required = true, joinClasspath = true)

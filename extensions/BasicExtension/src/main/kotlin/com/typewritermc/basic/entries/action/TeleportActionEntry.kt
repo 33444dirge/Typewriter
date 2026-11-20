@@ -13,7 +13,8 @@ import com.typewritermc.engine.paper.entry.entries.ActionEntry
 import com.typewritermc.engine.paper.entry.entries.ActionTrigger
 import com.typewritermc.engine.paper.entry.entries.ConstVar
 import com.typewritermc.engine.paper.entry.entries.Var
-import com.typewritermc.engine.paper.utils.TickedAsync
+import com.typewritermc.engine.paper.utils.entityDispatcher
+import com.typewritermc.engine.paper.utils.foliaScheduler
 import com.typewritermc.engine.paper.utils.toBukkitLocation
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.future.await
@@ -37,8 +38,8 @@ class TeleportActionEntry(
 ) : ActionEntry {
     override fun ActionTrigger.execute() {
         disableAutomaticTriggering()
-        Dispatchers.TickedAsync.launch {
-            player.teleportAsync(location.get(player, context).toBukkitLocation()).await()
+        player.entityDispatcher.launch {
+            if (!foliaScheduler.teleport(player, location.get(player, context).toBukkitLocation()).await()) return@launch
             applyModifiers()
             triggerManually()
         }

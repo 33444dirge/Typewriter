@@ -2,6 +2,7 @@ package com.typewritermc.engine.paper.utils
 
 import lirand.api.extensions.server.registerEvents
 import org.bukkit.entity.Player
+import org.bukkit.Bukkit
 import org.bukkit.event.EventHandler
 import org.bukkit.event.EventPriority
 import org.bukkit.event.Listener
@@ -24,13 +25,13 @@ import java.util.concurrent.ConcurrentHashMap
  * released it. Owners are compared by identity, so anything whose lifetime matches the feature's can
  * serve as one, usually the display or bound that took the hide.
  *
- * Hiding and revealing both call Bukkit, so both have to happen on the server thread. The
- * bookkeeping itself is concurrent, because once the plugin is disabled the dispatcher stops
- * scheduling onto the server thread and teardown runs on whichever thread triggered it.
+ * Changes are reconciled on the viewer's owning region. The queued callback reads the current
+ * claims again, so a delayed reveal cannot override a newer hide from another feature.
  */
 class PlayerHides : Listener, KoinComponent {
     private val plugin: Plugin by inject()
     private val ownersByPair = ConcurrentHashMap<HidePair, MutableSet<OwnerRef>>()
+    private val pending = ConcurrentHashMap<HidePair, Any>()
 
     /** Registers the quit handler. Call once while the plugin enables. */
     fun initialize() {
@@ -53,13 +54,12 @@ class PlayerHides : Listener, KoinComponent {
      */
     fun hide(owner: Any, viewer: Player, target: Player) {
         if (viewer.uniqueId == target.uniqueId) return
-        // Bukkit refuses to hide anything once the plugin is disabled. Calling it first means a
-        // refusal leaves no record, which would otherwise keep the pair hidden for an owner whose
-        // hide never reached the client.
-        viewer.hidePlayer(plugin, target)
-        ownersByPair.compute(HidePair(viewer.uniqueId, target.uniqueId)) { _, existing ->
+        if (!foliaScheduler.active()) return
+        val pair = HidePair(viewer.uniqueId, target.uniqueId)
+        ownersByPair.compute(pair) { _, existing ->
             (existing ?: identityOwners()).apply { add(OwnerRef(owner)) }
         }
+        reconcile(pair)
     }
 
     /**
@@ -68,7 +68,7 @@ class PlayerHides : Listener, KoinComponent {
      */
     fun show(owner: Any, viewer: UUID, target: UUID) {
         val pair = HidePair(viewer, target)
-        if (dropOwner(pair, OwnerRef(owner))) reveal(pair)
+        if (dropOwner(pair, OwnerRef(owner))) reconcile(pair)
     }
 
     /** Releases every hide an owner still holds, for a feature that hid many players at once. */
@@ -76,7 +76,7 @@ class PlayerHides : Listener, KoinComponent {
         val ref = OwnerRef(owner)
         val revealed = ArrayList<HidePair>()
         ownersByPair.keys.forEach { pair -> if (dropOwner(pair, ref)) revealed.add(pair) }
-        revealed.forEach(::reveal)
+        revealed.forEach(::reconcile)
     }
 
     /** @return true when that was the last owner, so the pair has to be revealed. */
@@ -99,15 +99,33 @@ class PlayerHides : Listener, KoinComponent {
      */
     fun forget(playerId: UUID) {
         ownersByPair.keys.removeIf { it.viewer == playerId || it.target == playerId }
+        pending.keys.removeIf { it.viewer == playerId || it.target == playerId }
     }
 
     /** How many owners currently want the target hidden from the viewer. */
     fun ownerCount(viewer: UUID, target: UUID): Int = ownersByPair[HidePair(viewer, target)]?.size ?: 0
 
-    private fun reveal(pair: HidePair) {
+    private fun reconcile(pair: HidePair) {
         val viewer = server.getPlayer(pair.viewer) ?: return
-        val target = server.getPlayer(pair.target) ?: return
-        viewer.showPlayer(plugin, target)
+        val token = Any()
+        if (pending.putIfAbsent(pair, token) != null) return
+        val action = Runnable {
+            if (pending.remove(pair, token) && viewer.isOnline) {
+                val target = server.getPlayer(pair.target)
+                if (target != null) {
+                    if (ownersByPair[pair]?.isNotEmpty() == true) viewer.hidePlayer(plugin, target)
+                    else viewer.showPlayer(plugin, target)
+                }
+            }
+        }
+        if (Bukkit.isOwnedByCurrentRegion(viewer)) action.run()
+        else foliaScheduler.atEntity(viewer, action, { pending.remove(pair, token) }, 1L)
+    }
+
+    fun shutdown() {
+        pending.clear()
+        ownersByPair.clear()
+        org.bukkit.event.HandlerList.unregisterAll(this)
     }
 
     private fun identityOwners(): MutableSet<OwnerRef> = ConcurrentHashMap.newKeySet()

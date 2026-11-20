@@ -6,7 +6,11 @@ import com.typewritermc.engine.paper.entry.Modifier
 import com.typewritermc.engine.paper.entry.entries.DialogueEntry
 import com.typewritermc.engine.paper.entry.entries.EventTrigger
 import com.typewritermc.engine.paper.interaction.chatHistory
+import com.typewritermc.engine.paper.interaction.acceptActionBarMessage
 import com.typewritermc.engine.paper.plugin
+import com.typewritermc.engine.paper.events.DialogueDisplayCloseEvent
+import com.typewritermc.engine.paper.events.DialogueInputEvent
+import com.typewritermc.engine.paper.events.signalDialogueInput
 import lirand.api.extensions.events.unregister
 import lirand.api.extensions.server.registerEvents
 import org.bukkit.entity.Player
@@ -31,12 +35,21 @@ open class DialogueMessenger<DE : DialogueEntry>(
 
     open fun init() {
         plugin.registerEvents(this)
+        player.signalDialogueInput(entry.id, DialogueInputEvent.Action.OPEN)
     }
 
     open fun tick(context: TickContext) {}
 
     open fun dispose() {
         unregister()
+        if (DialogueDisplayCloseEvent.getHandlerList().registeredListeners.isNotEmpty()) {
+            val request = DialogueDisplayCloseEvent(player, entry.id)
+            request.callEvent()
+            request.actionBarMessage?.let {
+                player.acceptActionBarMessage(it)
+                player.sendActionBar(it)
+            }
+        }
     }
 
     open fun end() {
@@ -51,6 +64,8 @@ open class DialogueMessenger<DE : DialogueEntry>(
         get() = entry.modifiers
 
     fun completeOrFinish() {
+        if (state != MessengerState.RUNNING) return
+        player.signalDialogueInput(entry.id, DialogueInputEvent.Action.CONFIRM)
         if (animationComplete) {
             state = MessengerState.FINISHED
         } else {

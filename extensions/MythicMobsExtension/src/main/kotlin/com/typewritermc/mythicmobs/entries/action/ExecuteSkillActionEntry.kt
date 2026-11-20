@@ -11,13 +11,14 @@ import com.typewritermc.engine.paper.entry.entries.ActionTrigger
 import com.typewritermc.engine.paper.entry.entries.ConstVar
 import com.typewritermc.engine.paper.entry.entries.Var
 import com.typewritermc.engine.paper.logger
+import com.typewritermc.core.utils.launch
+import com.typewritermc.engine.paper.utils.entityDispatcher
 import io.lumine.mythic.api.mobs.GenericCaster
 import io.lumine.mythic.bukkit.BukkitAdapter
 import io.lumine.mythic.bukkit.MythicBukkit
 import io.lumine.mythic.core.skills.SkillMetadataImpl
 import io.lumine.mythic.core.skills.SkillTriggers
 import io.lumine.mythic.core.utils.MythicUtil
-import org.bukkit.entity.Player
 
 @Entry("execute_mythicmob_skill", "Executes a MythicMobs skill", Colors.RED, "fa6-solid:bolt-lightning")
 /**
@@ -36,6 +37,7 @@ class ExecuteSkillActionEntry(
     val skillName: Var<String> = ConstVar(""),
 ) : ActionEntry {
     override fun ActionTrigger.execute() {
+        player.entityDispatcher.launch {
         val skillName = skillName.get(player, context)
         val skill = MythicBukkit.inst().skillManager.getSkill(skillName).orElseGet {
             throw IllegalArgumentException("Skill $skillName not found")
@@ -57,5 +59,6 @@ class ExecuteSkillActionEntry(
                 1f
             )
         } else logger.warning("Skill $skillName is not usable at this time (cooldown, etc.)")
+        }
     }
 }

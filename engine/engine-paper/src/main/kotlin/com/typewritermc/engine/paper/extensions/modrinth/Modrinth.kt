@@ -2,50 +2,65 @@ package com.typewritermc.engine.paper.extensions.modrinth
 
 import com.google.gson.GsonBuilder
 import com.google.gson.annotations.SerializedName
-import com.typewritermc.core.utils.launch
 import com.typewritermc.engine.paper.plugin
-import com.typewritermc.engine.paper.utils.TickedAsync
 import com.typewritermc.engine.paper.utils.asMini
+import com.typewritermc.engine.paper.utils.foliaScheduler
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.future.await
 import lirand.api.extensions.events.SimpleListener
 import lirand.api.extensions.events.listen
 import org.bukkit.entity.Player
 import org.bukkit.event.player.PlayerJoinEvent
+import org.bukkit.event.player.PlayerQuitEvent
+import org.bukkit.event.HandlerList
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.text.DateFormat
 import java.util.*
-import kotlin.time.Duration.Companion.seconds
+import java.util.concurrent.ConcurrentHashMap
 
 object Modrinth {
     private const val VERSIONS_URL = "https://api.modrinth.com/v2/project/typewriter/version"
-    private var newVersion: ModrinthVersion? = null
-    private val notifiedPlayers = mutableSetOf<UUID>()
+    @Volatile private var newVersion: ModrinthVersion? = null
+    @Volatile private var active = false
+    private val notifiedPlayers = ConcurrentHashMap.newKeySet<UUID>()
     private val listener = SimpleListener()
 
     suspend fun initialize() {
+        active = true
         plugin.listen<PlayerJoinEvent>(listener) {
-            if (!canSendNotification(it.player)) return@listen
-            Dispatchers.TickedAsync.launch {
-                delay(5.seconds)
-                notifyPlayer(it.player)
-            }
+            val player = it.player
+            foliaScheduler.atEntity(player, { notifyPlayer(player) }, null, 100L)
         }
+        plugin.listen<PlayerQuitEvent>(listener) { notifiedPlayers.remove(it.player.uniqueId) }
         loadVersion()
+    }
+
+    fun shutdown() {
+        active = false
+        newVersion = null
+        HandlerList.unregisterAll(listener)
+        notifiedPlayers.clear()
     }
 
     private suspend fun loadVersion() {
         val request = HttpRequest.newBuilder(URI(VERSIONS_URL))
+            .timeout(java.time.Duration.ofSeconds(15))
             .GET()
             .build()
 
-        val response = HttpClient.newHttpClient().sendAsync(request, HttpResponse.BodyHandlers.ofString()).await()
+        val client = HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(10)).build()
+        val response = try {
+            client.sendAsync(request, HttpResponse.BodyHandlers.ofString()).await()
+        } finally {
+            withContext(NonCancellable + Dispatchers.IO) { client.close() }
+        }
 
-        if (response.statusCode() != 200) return
+        if (!active || response.statusCode() != 200) return
 
         val versions = GsonBuilder()
             .setDateFormat(DateFormat.FULL, DateFormat.FULL)
@@ -71,7 +86,9 @@ object Modrinth {
         """.trimMargin()
         )
 
-        plugin.server.onlinePlayers.forEach { notifyPlayer(it) }
+        plugin.server.onlinePlayers.toList().forEach { player ->
+            foliaScheduler.atEntity(player, { notifyPlayer(player) }, null, 1L)
+        }
     }
 
     private fun findLatestVersion(versions: List<ModrinthVersion>): ModrinthVersion? {
@@ -85,7 +102,7 @@ object Modrinth {
     }
 
     private fun canSendNotification(player: Player): Boolean {
-        if (newVersion == null) return false
+        if (!active || newVersion == null) return false
         if (player.uniqueId in notifiedPlayers) return false
         return player.hasPermission("typewriter.update")
     }
@@ -93,7 +110,7 @@ object Modrinth {
     private fun notifyPlayer(player: Player) {
         if (!canSendNotification(player)) return
         val newVersion = newVersion ?: return
-        notifiedPlayers.add(player.uniqueId)
+        if (!notifiedPlayers.add(player.uniqueId)) return
 
         player.sendMessage(
             """
@@ -165,7 +182,7 @@ data class SemanticVersion(
 ) : Comparable<SemanticVersion> {
     companion object {
         fun fromString(version: String): SemanticVersion {
-            val versionParts = version.split("-")
+            val versionParts = version.substringBefore("-folia").split("-")
             val versionPart = versionParts[0]
             val parts = versionPart.split(".")
             if (parts.size != 3) {

@@ -9,7 +9,8 @@ import com.typewritermc.core.extension.annotations.EntryListener
 import com.typewritermc.core.interaction.context
 import com.typewritermc.engine.paper.entry.*
 import com.typewritermc.engine.paper.entry.entries.EventEntry
-import kotlinx.coroutines.runBlocking
+import com.typewritermc.core.utils.launch
+import kotlinx.coroutines.Dispatchers
 import org.bukkit.event.player.PlayerQuitEvent
 
 @Entry("on_player_quit", "When the player quits the server", Colors.YELLOW, "fluent:person-subtract-20-filled")
@@ -28,7 +29,7 @@ class PlayerQuitEventEntry(
 
 @EntryListener(PlayerQuitEventEntry::class)
 fun onQuit(event: PlayerQuitEvent, query: Query<PlayerQuitEventEntry>) {
-    runBlocking {
+    Dispatchers.Unconfined.launch {
         query.find().flatMap { it.eventTriggers }.toList().forceTriggerFor(event.player, context())
     }
 }

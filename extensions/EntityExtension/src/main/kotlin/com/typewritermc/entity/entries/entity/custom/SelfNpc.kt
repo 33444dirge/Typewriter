@@ -82,6 +82,11 @@ class SelfNpc(
 
     override fun contains(entityId: Int): Boolean = playerEntity.contains(entityId)
 
+    override fun retireResources() {
+        playerEntity.retireResources()
+        super.retireResources()
+    }
+
     override fun dispose() {
         super.dispose()
         playerEntity.dispose()

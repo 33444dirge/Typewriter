@@ -63,6 +63,6 @@ class CronAudienceDisplay(
         lastUpdate = newTime
 
         val active = active
-        consideredPlayers.forEach { it.updateFilter(active) }
+        forEachConsideredPlayer { it.updateFilter(active) }
     }
 }

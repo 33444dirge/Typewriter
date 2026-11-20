@@ -18,7 +18,7 @@ import de.bsommerfeld.pathetic.api.pathing.Pathfinder
 import de.bsommerfeld.pathetic.api.pathing.processing.CostProcessor
 import de.bsommerfeld.pathetic.api.pathing.processing.ValidationProcessor
 import de.bsommerfeld.pathetic.api.wrapper.PathPosition
-import de.bsommerfeld.pathetic.bukkit.context.BukkitEnvironmentContext
+import com.typewritermc.roadnetwork.pathfinding.pathetic.findSnapshotPath
 import de.bsommerfeld.pathetic.bukkit.mapper.BukkitMapper
 import kotlinx.coroutines.suspendCancellableCoroutine
 import org.koin.core.parameter.parametersOf
@@ -82,15 +82,9 @@ private suspend fun executePathfindingWithDebug(
         Pathfinder::class.java, null
     ) { parametersOf(processors, costProcessors) }
 
-    val result = suspendCancellableCoroutine { continuation ->
-        val search = pathfinder
-            .findPath(startPos, targetPos, BukkitEnvironmentContext(world.toBukkitWorld()))
-            .ifPresent { continuation.resume(it.takeIf { result -> result.successful() }) }
-            .orElse { continuation.resume(null) }
-            .exceptionally { continuation.resumeWithException(it) }
-
-        continuation.invokeOnCancellation { search.abort() }
-    }
+    val result = pathfinder.findSnapshotPath(
+        startPos, targetPos, org.bukkit.Location(world.toBukkitWorld(), startPos.x, startPos.y, startPos.z),
+    )?.takeIf { it.successful() }
 
     val recorder = recorderSupplier.getRecorder()
 

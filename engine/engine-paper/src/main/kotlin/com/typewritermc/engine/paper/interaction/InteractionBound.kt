@@ -1,6 +1,5 @@
 package com.typewritermc.engine.paper.interaction
 
-import com.github.shynixn.mccoroutine.bukkit.registerSuspendingEvents
 import com.typewritermc.core.interaction.*
 import com.typewritermc.engine.paper.entry.entries.EventTrigger
 import com.typewritermc.engine.paper.entry.entries.InteractionEndTrigger
@@ -40,7 +39,7 @@ interface ListenerInteractionBound : InteractionBound, Listener {
 
     override suspend fun initialize() {
         super.initialize()
-        server.pluginManager.registerSuspendingEvents(this, plugin)
+        server.pluginManager.registerEvents(this, plugin)
     }
 
     override suspend fun teardown() {

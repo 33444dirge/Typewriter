@@ -18,6 +18,7 @@ import com.typewritermc.engine.paper.facts.FactDatabase
 import com.typewritermc.engine.paper.interaction.*
 import com.typewritermc.engine.paper.utils.playSound
 import kotlinx.coroutines.Dispatchers
+import com.typewritermc.engine.paper.utils.entityDispatcher
 import org.bukkit.entity.Player
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
@@ -61,7 +62,7 @@ class DialogueInteraction(
     override suspend fun initialize(): Result<Unit> {
         setup()
         tick(playTime)
-        Dispatchers.UntickedAsync.launch {
+        player.entityDispatcher.launch {
             AsyncDialogueStartEvent(player).callEvent()
         }
         return ok(Unit)
@@ -104,7 +105,7 @@ class DialogueInteraction(
         currentMessenger =
             nextEntry.messenger(player, nextContext) ?: EmptyDialogueMessenger(player, nextContext, nextEntry)
         setup()
-        Dispatchers.UntickedAsync.launch {
+        player.entityDispatcher.launch {
             AsyncDialogueSwitchEvent(player).callEvent()
         }
     }
@@ -124,7 +125,7 @@ class DialogueInteraction(
     override suspend fun teardown() {
         isActive = false
         cleanupEntry(true)
-        Dispatchers.UntickedAsync.launch {
+        player.entityDispatcher.launch {
             AsyncDialogueEndEvent(player).callEvent()
         }
     }

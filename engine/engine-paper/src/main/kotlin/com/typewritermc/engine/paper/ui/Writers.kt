@@ -5,6 +5,7 @@ import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
+import java.util.concurrent.atomic.AtomicReference
 
 data class Writer(
     val id: String = "",
@@ -28,12 +29,12 @@ data class Writer(
 
 class Writers : KoinComponent {
     private val communicationHandler: CommunicationHandler by inject()
-    private var writers = listOf<Writer>()
-    private var lastSynced = 0L
+    private data class Roster(val writers: List<Writer> = emptyList(), val lastSynced: Long = 0, val closed: Boolean = false)
+    private val roster = AtomicReference(Roster())
 
 
     private fun addWriter(writer: Writer) {
-        writers = writers + writer
+        update { writers -> writers.filterNot { it.id == writer.id } + writer }
     }
 
     fun addWriter(id: String, iconUrl: String?) {
@@ -41,12 +42,12 @@ class Writers : KoinComponent {
     }
 
     private fun updateWriter(writer: Writer) {
-        writers = writers.map { if (it.id == writer.id) it.merge(writer) else it }
+        update { writers -> writers.map { if (it.id == writer.id) it.merge(writer) else it } }
         syncWriters()
     }
 
     fun removeWriter(id: String) {
-        writers = writers.filter { it.id != id }
+        update { writers -> writers.filter { it.id != id } }
         syncWriters()
     }
 
@@ -69,30 +70,31 @@ class Writers : KoinComponent {
      * disconnects.
      */
     private fun syncWriters() {
+        val previous = roster.get()
+        if (previous.closed) return
         val now = System.currentTimeMillis()
-        if (now - lastSynced < 30_000) return
-        lastSynced = now
+        if (now - previous.lastSynced < 30_000) return
 
         val clientIds =
             communicationHandler.server?.allClients?.map { it.sessionId.toString() }
                 ?: return
-        // If a writer is not connected, remove it
-        writers = writers.filter { clientIds.contains(it.id) }
-        // If a client is not a writer, add it
-        clientIds.forEach { id ->
-            if (writers.none { it.id == id }) {
-                val iconUrl = communicationHandler.getIconUrl(id)
-                addWriter(id, iconUrl)
-            }
+        val retained = previous.writers.filter { it.id in clientIds }
+        val missing = clientIds.filter { id -> retained.none { it.id == id } }.map { id ->
+            Writer(id, communicationHandler.getIconUrl(id))
         }
+        roster.compareAndSet(previous, previous.copy(writers = retained + missing, lastSynced = now))
+    }
+
+    private fun update(change: (List<Writer>) -> List<Writer>) {
+        roster.updateAndGet { if (it.closed) it else it.copy(writers = change(it.writers)) }
     }
 
     fun dispose() {
-        writers = listOf()
+        roster.updateAndGet { it.copy(writers = emptyList(), closed = true) }
     }
 
     fun serialize(): String {
-        return Gson().toJson(writers)
+        return Gson().toJson(roster.get().writers)
     }
 }
 

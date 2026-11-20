@@ -1,0 +1,12 @@
+{
+  "soundId": {
+    "type": "default",
+    "value": "minecraft:block.note_block.chime"
+  },
+  "soundSource": {
+    "type": "self"
+  },
+  "track": "MASTER",
+  "volume": 0.35,
+  "pitch": 1.35
+}

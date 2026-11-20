@@ -1,6 +1,8 @@
 package com.typewritermc.engine.paper.ui
 
 import com.corundumstudio.socketio.Configuration
+import com.corundumstudio.socketio.AckMode
+import com.corundumstudio.socketio.AckRequest
 import com.corundumstudio.socketio.HandshakeData
 import com.corundumstudio.socketio.SocketIOClient
 import com.corundumstudio.socketio.SocketIOServer
@@ -20,7 +22,9 @@ import org.bukkit.entity.Player
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
 import java.time.Instant
+import java.time.Duration
 import java.util.*
+import java.util.concurrent.atomic.AtomicBoolean
 
 
 class CommunicationHandler : KoinComponent {
@@ -62,14 +66,26 @@ class CommunicationHandler : KoinComponent {
     private val websocketHostname: String? by optionalConfig("websocket.hostname")
     private val websocketAppendPort: Boolean? by optionalConfig("websocket.append_port")
     private val websocketSecure: Boolean? by optionalConfig("websocket.secure")
+    private val bindAddress: String by config("websocket.bind", "0.0.0.0", "WebSocket监听地址；0.0.0.0监听所有网卡，127.0.0.1仅允许本机访问。修改后重启生效。")
 
 
     val authenticationEnabled: Boolean
         get() = auth == "session"
 
-    private val sessionTokens: MutableMap<UUID, SessionData> = mutableMapOf()
+    private val maxSessions: Int by config(
+        "websocket.sessions.capacity", 1024,
+        "编辑器链接令牌最大数量（1–16384）；达到上限时淘汰最久未使用的链接，需重新打开编辑器。修改后重启生效。",
+    )
+    private val sessionIdleMinutes: Int by config(
+        "websocket.sessions.idle-minutes", 30,
+        "编辑器链接闲置有效期，单位分钟（1–10080）；握手与编辑操作续期，过期后需重新打开编辑器。修改后重启生效。",
+    )
+    private val sessionTokens by lazy {
+        SessionTokenRegistry(maxSessions.coerceIn(1, 16384), Duration.ofMinutes(sessionIdleMinutes.coerceIn(1, 10080).toLong()))
+    }
+    private val stopped = AtomicBoolean()
 
-    var server: SocketIOServer? = null
+    @Volatile var server: SocketIOServer? = null
         private set
 
     fun initialize() {
@@ -77,45 +93,48 @@ class CommunicationHandler : KoinComponent {
         logger.warning("Websocket server is enabled. This is not recommended for production servers.")
         panelHost.initialize()
         val config = Configuration().apply {
-            hostname = "0.0.0.0"
+            ackMode = AckMode.MANUAL
+            hostname = bindAddress
             port = this@CommunicationHandler.webSocketPort
             isWebsocketCompression = false // Disable compression to avoid Netty 4.1/4.2 API conflict
             setAuthorizationListener(this@CommunicationHandler::authenticate)
         }
 
-        server = SocketIOServer(config)
+        val currentServer = SocketIOServer(config)
+        server = currentServer
 
-        server?.addEventListener("fetch", String::class.java, clientSynchronizer::handleFetchRequest)
-        server?.addEventListener("createPage", String::class.java, clientSynchronizer::handleCreatePage)
-        server?.addEventListener("renamePage", String::class.java, clientSynchronizer::handleRenamePage)
-        server?.addEventListener("changePageValue", String::class.java, clientSynchronizer::handleChangePageValue)
-        server?.addEventListener("deletePage", String::class.java, clientSynchronizer::handleDeletePage)
-        server?.addEventListener("moveEntry", String::class.java, clientSynchronizer::handleMoveEntry)
-        server?.addEventListener("createEntry", String::class.java, clientSynchronizer::handleCreateEntry)
-        server?.addEventListener("updateEntry", String::class.java, clientSynchronizer::handleEntryFieldUpdate)
-        server?.addEventListener(
+        registerEvent("fetch", clientSynchronizer::handleFetchRequest)
+        registerEvent("createPage", clientSynchronizer::handleCreatePage)
+        registerEvent("renamePage", clientSynchronizer::handleRenamePage)
+        registerEvent("changePageValue", clientSynchronizer::handleChangePageValue)
+        registerEvent("deletePage", clientSynchronizer::handleDeletePage)
+        registerEvent("moveEntry", clientSynchronizer::handleMoveEntry)
+        registerEvent("createEntry", clientSynchronizer::handleCreateEntry)
+        registerEvent("updateEntry", clientSynchronizer::handleEntryFieldUpdate)
+        registerEvent(
             "updateCompleteEntry",
-            String::class.java,
             clientSynchronizer::handleEntryUpdate
         )
-        server?.addEventListener("reorderEntry", String::class.java, clientSynchronizer::handleReorderEntry)
-        server?.addEventListener("deleteEntry", String::class.java, clientSynchronizer::handleDeleteEntry)
+        registerEvent("reorderEntry", clientSynchronizer::handleReorderEntry)
+        registerEvent("deleteEntry", clientSynchronizer::handleDeleteEntry)
 
-        server?.addEventListener("publish", String::class.java, clientSynchronizer::handlePublish)
+        registerEvent("publish", clientSynchronizer::handlePublish)
 
-        server?.addEventListener("updateWriter", String::class.java, clientSynchronizer::handleUpdateWriter)
-        server?.addEventListener("contentModeRequest", String::class.java, clientSynchronizer::handleContentModeRequest)
+        registerEvent("updateWriter", clientSynchronizer::handleUpdateWriter)
+        registerEvent("contentModeRequest", clientSynchronizer::handleContentModeRequest)
 
         server?.addConnectListener { socket ->
+            if (server !== currentServer || !authenticate(socket.handshakeData)) {
+                socket.disconnect()
+                return@addConnectListener
+            }
             logger.info("Client connected: ${socket.remoteAddress}")
             socket.sendEvent("stagingState", stagingManager.stagingState.name.lowercase())
             socket.sendEvent("serverInfo", Bukkit.getMinecraftVersion())
 
             val token = getSessionToken(socket.handshakeData)
             if (token != null) {
-                sessionTokens.computeIfPresent(token) { _, session ->
-                    session.copy(lastConnectionId = socket.sessionId)
-                }
+                sessionTokens.connected(token, socket.sessionId)
             }
 
             val iconUrl = getIconUrl(token)
@@ -125,6 +144,7 @@ class CommunicationHandler : KoinComponent {
         }
 
         server?.addDisconnectListener {
+            if (server !== currentServer) return@addDisconnectListener
             logger.info("Client disconnected: ${it.remoteAddress}")
             server?.broadcastOperations?.sendEvent("disconnectWriter", it, it.sessionId.toString())
 
@@ -153,11 +173,12 @@ class CommunicationHandler : KoinComponent {
     }
 
     private fun authenticate(data: HandshakeData): Boolean {
+        if (stopped.get()) return false
         if (auth == "none") return true
         if (auth == "session") {
             val token = getSessionToken(data)
                 .logErrorIfNull("${data.address} tried to connect to the socket without token!") ?: return false
-            val session = sessionTokens[token] ?: return false
+            val session = sessionTokens.get(token) ?: return false
             return session.isValid
         }
         return false
@@ -167,21 +188,23 @@ class CommunicationHandler : KoinComponent {
         if (auth == "none") return null
         if (auth == "session") {
             val token = data.getSingleUrlParam("token") ?: return null
-            return UUID.fromString(token)
+            return runCatching { UUID.fromString(token) }.getOrNull()
         }
         return null
     }
 
-    private fun generateSessionToken(playerId: UUID?): UUID {
-        // If there already is a token for this player, use that one.
-        val existingToken = sessionTokens.filter { it.value.playerId == playerId }.keys.firstOrNull()
-        if (existingToken != null) return existingToken
-
-        // Otherwise, create a new token.
-        val token = UUID.randomUUID()
-        sessionTokens[token] = SessionData.create(playerId)
-        return token
+    private fun registerEvent(name: String, handler: (SocketIOClient, String, AckRequest) -> Unit) {
+        val current = server ?: return
+        current.addEventListener(name, String::class.java) { client, data, ack ->
+            if (server !== current || !authenticate(client.handshakeData)) {
+                client.disconnect()
+                return@addEventListener
+            }
+            handler(client, data, ack)
+        }
     }
+
+    private fun generateSessionToken(playerId: UUID?): UUID = sessionTokens.generate(playerId)
 
     fun generateUrl(playerId: UUID?): String {
         var url: String = if (hostName.startsWith("http")) hostName
@@ -198,7 +221,7 @@ class CommunicationHandler : KoinComponent {
 
     fun getPlayer(client: SocketIOClient): Player? {
         val token = getSessionToken(client.handshakeData) ?: return null
-        val session = sessionTokens[token] ?: return null
+        val session = sessionTokens.get(token) ?: return null
         return session.playerId?.let { plugin.server.getPlayer(it) }
     }
 
@@ -209,17 +232,27 @@ class CommunicationHandler : KoinComponent {
     }
 
     private fun getIconUrl(token: UUID?): String? {
-        val session = sessionTokens[token] ?: return null
+        if (token == null) return null
+        val session = sessionTokens.get(token) ?: return null
         return session.playerId?.let {
             "https://crafatar.com/avatars/$it?size=64&overlay"
         }
     }
 
     fun shutdown() {
-        if (!enabled) return
-        server?.stop()
-        panelHost.dispose()
-        writers.dispose()
+        stopped.set(true)
+        sessionTokens.close()
+        val previous = server
+        server = null
+        try {
+            previous?.stop()
+        } finally {
+            try {
+                panelHost.dispose()
+            } finally {
+                writers.dispose()
+            }
+        }
     }
 }
 

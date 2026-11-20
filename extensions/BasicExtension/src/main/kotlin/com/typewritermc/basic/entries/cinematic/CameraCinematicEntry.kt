@@ -1,10 +1,13 @@
 package com.typewritermc.basic.entries.cinematic
 
+import com.typewritermc.engine.paper.utils.entityDispatcher
+
 import com.github.retrooper.packetevents.protocol.entity.type.EntityTypes
 import com.github.retrooper.packetevents.protocol.packettype.PacketType
 import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientInteractEntity
 import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientPlayerPosition
 import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientPlayerPositionAndRotation
+import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientTeleportConfirm
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerPlayerPositionAndLook
 import com.typewritermc.basic.entries.cinematic.DisplayCameraAction.Companion.BASE_INTERPOLATION
 import com.typewritermc.basic.entries.variables.PlayerPositionOverride
@@ -29,6 +32,7 @@ import com.typewritermc.engine.paper.utils.GenericPlayerStateProvider.VELOCITY
 import io.github.retrooper.packetevents.util.SpigotConversionUtil
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.future.await
+import kotlinx.coroutines.withTimeoutOrNull
 import lirand.api.extensions.events.SimpleListener
 import lirand.api.extensions.events.listen
 import lirand.api.extensions.events.unregister
@@ -153,17 +157,37 @@ class CameraCinematicAction(
     private val player: Player,
     private val entry: CameraCinematicEntry,
     context: InteractionContext,
-) : CinematicAction, ContextModifier(context) {
+) : CinematicAction, RetirableCinematicAction, ContextModifier(context) {
     private var previousSegment: CameraSegment? = null
     private lateinit var action: CameraAction
 
     private var originalState: PlayerState? = null
+    private var recoveryTicket: StateRecoveryTicket? = null
     private var interceptor: InterceptionBundle? = null
+    private var coordinateInterceptor: InterceptionBundle? = null
+    private var coordinateHandoff: CameraCoordinateHandoff? = null
     private var listener: Listener? = null
     private var boundStateSubscription: InteractionBoundStateOverrideSubscription? = null
     private var confirmationInput: ConfirmationRegistration? = null
 
     private var lastFrame: Int = 0
+
+    override fun retire() {
+        confirmationInput?.dispose()
+        confirmationInput = null
+        listener?.unregister()
+        listener = null
+        interceptor?.cancel()
+        interceptor = null
+        coordinateHandoff?.close()
+        coordinateHandoff = null
+        coordinateInterceptor?.cancel()
+        coordinateInterceptor = null
+        if (::action.isInitialized) action.retire()
+        if (enableLegacyVisibility) playerHides.release(this)
+        context.clear(PlayerPositionOverride)
+        boundStateSubscription = null
+    }
 
     override suspend fun setup() {
         action = if (player.isFloodgate) {
@@ -222,19 +246,21 @@ class CameraCinematicAction(
         }
 
         if (originalState == null) {
-            originalState = state(
+            val savedState = state(
                 listOfNotNull(
                     LOCATION,
                     EffectStateProvider(INVISIBILITY),
                     VELOCITY.takeIf { entry.advancedCameraSettings.restoreVelocity }
                 )
             )
+            recoveryTicket = rememberStateForRecovery(savedState)
+            originalState = savedState
             context[PlayerPositionOverride] = position
         }
 
         sendFakeFlight()
 
-        Dispatchers.Sync.switchContext {
+        this.entityDispatcher.switchContext {
             addPotionEffect(PotionEffect(INVISIBILITY, INFINITE_DURATION, 0, false, false))
 
             // TODO: Remove this and the release in teardown once the visibility extension is
@@ -279,32 +305,41 @@ class CameraCinematicAction(
             if (it.cause != PlayerKickEvent.Cause.FLYING_PLAYER) return@listen
             it.isCancelled = true
         }
+        val bedrock = isFloodgate
+        val cameraPlayerEntityId = entityId
         interceptor = this.interceptPackets {
             keepFakeFlight()
             // If the player is a bedrock player, we don't want to modify the location.
-            if (isFloodgate) return@interceptPackets
+            if (bedrock) return@interceptPackets
             keepFakeInventory()
+            PacketType.Play.Client.INTERACT_ENTITY { event ->
+                val packet = WrapperPlayClientInteractEntity(event)
+                if (cameraPlayerEntityId == packet.entityId) event.isCancelled = true
+            }
+        }
+        if (bedrock) return
+        val handoff = CameraCoordinateHandoff()
+        coordinateHandoff = handoff
+        coordinateInterceptor = this.interceptPackets {
             PacketType.Play.Server.PLAYER_POSITION_AND_LOOK { event ->
                 val packet = WrapperPlayServerPlayerPositionAndLook(event)
-                packet.y += 500
+                packet.y = handoff.outgoingY(packet.y, packet.teleportId)
             }
             PacketType.Play.Client.PLAYER_POSITION { event ->
                 val packet = WrapperPlayClientPlayerPosition(event)
-                packet.position = packet.position.withY(packet.position.y - 500)
+                val y = handoff.incomingY(packet.position.y)
+                if (y == null) event.isCancelled = true
+                else packet.position = packet.position.withY(y)
             }
             PacketType.Play.Client.PLAYER_POSITION_AND_ROTATION { event ->
                 val packet = WrapperPlayClientPlayerPositionAndRotation(event)
-                packet.position = packet.position.withY(packet.position.y - 500)
+                val y = handoff.incomingY(packet.position.y)
+                if (y == null) event.isCancelled = true
+                else packet.position = packet.position.withY(y)
             }
-            // We want to fake the player's location on the client because otherwise they will interact with
-            // themselves crash kicking themselves off the server.
-            PacketType.Play.Client.INTERACT_ENTITY { event ->
-                val packet = WrapperPlayClientInteractEntity(event)
-                // Don't allow the player to interact with themselves.
-                if (this@setup.entityId != packet.entityId) return@INTERACT_ENTITY
-                event.isCancelled = true
+            PacketType.Play.Client.TELEPORT_CONFIRM { event ->
+                handoff.confirm(WrapperPlayClientTeleportConfirm(event).teleportId)
             }
-
         }
     }
 
@@ -314,37 +349,45 @@ class CameraCinematicAction(
 
         listener?.unregister()
         listener = null
+        interceptor?.cancel()
+        interceptor = null
+        val handoff = coordinateHandoff
+        handoff?.beginRestore()
 
-        Dispatchers.Sync.switchContext {
-            interceptor?.cancel()
-            interceptor = null
-
-            originalState?.let {
-                restore(it)
+        try {
+            this.entityDispatcher.switchContext {
+                val restored = restoreAsync(originalState)
+                if (restored && handoff != null) {
+                    val confirmed = withTimeoutOrNull(5_000L) { handoff.awaitConfirmation() } == true
+                    if (!confirmed) logger.warning("Camera position recovery was not confirmed within 5 seconds for $uniqueId")
+                }
+                if (restored) recoveryTicket?.let { completeStateRecovery(it) }
+                sendRealAbilities()
+                if (enableLegacyVisibility) playerHides.release(this@CameraCinematicAction)
+                if (gameMode != GameMode.CREATIVE && !isFloodgate) {
+                    restoreInventory()
+                }
             }
-            sendRealAbilities()
-            // Revealed only after the player is restored, so nobody sees them reappear at the
-            // camera's position.
-            if (enableLegacyVisibility) playerHides.release(this@CameraCinematicAction)
+        } finally {
+            handoff?.close()
+            coordinateHandoff = null
+            coordinateInterceptor?.cancel()
+            coordinateInterceptor = null
             originalState = null
-
-            if (gameMode != GameMode.CREATIVE && !isFloodgate) {
-                restoreInventory()
-            }
+            recoveryTicket = null
+            context.clear(PlayerPositionOverride)
+            boundStateSubscription?.cancel()
+            boundStateSubscription = null
         }
-
-        context.clear(PlayerPositionOverride)
-
-        // Do this after restoring the player's state.
-        // To make sure the player is where they were before the bound got overridden.
-        boundStateSubscription?.cancel()
-        boundStateSubscription = null
     }
 
     override suspend fun teardown() {
         super.teardown()
-        action.stop()
-        player.teardown()
+        try {
+            action.stop()
+        } finally {
+            player.teardown()
+        }
     }
 
     override fun canFinish(frame: Int): Boolean = entry.segments canFinishAt frame
@@ -368,7 +411,7 @@ private suspend inline fun Player.teleportIfNeeded(
     if (frame % 10 == 0 || (location.distanceSqrt(location)
             ?: Double.MAX_VALUE) > MAX_DISTANCE_SQUARED
     )
-        teleportAsync(location).await()
+        foliaScheduler.teleport(this, location).await()
 }
 
 private data class PointSegment(
@@ -378,6 +421,7 @@ private data class PointSegment(
 ) : Segment
 
 private interface CameraAction {
+    fun retire() {}
     suspend fun startSegment(segment: CameraSegment)
     suspend fun tickSegment(frame: Int)
     suspend fun skipToFrame(frame: Int)
@@ -416,7 +460,7 @@ private class DisplayCameraAction(
         isActive = true
         setupPath(segment)
 
-        player.teleportAsync(path.first().position.toBukkitLocation()).await()
+        foliaScheduler.teleport(player, path.first().position.toBukkitLocation()).await()
         player.sendFakeFlight()
 
         entity.spawn(path.first().position.toPacketLocation())
@@ -452,7 +496,7 @@ private class DisplayCameraAction(
         newEntity.spawn(position.toPacketLocation())
         newEntity.addViewer(player.uniqueId)
 
-        player.teleportAsync(path.first().position.toBukkitLocation()).await()
+        foliaScheduler.teleport(player, path.first().position.toBukkitLocation()).await()
         player.spectateEntity(newEntity)
 
         entity.despawn()
@@ -463,7 +507,7 @@ private class DisplayCameraAction(
     private suspend fun switchWithStop() {
         player.stopSpectatingEntity()
         entity.despawn()
-        player.teleportAsync(path.first().position.toBukkitLocation()).await()
+        foliaScheduler.teleport(player, path.first().position.toBukkitLocation()).await()
         entity.spawn(path.first().position.toPacketLocation())
         player.spectateEntity(entity)
     }
@@ -473,6 +517,11 @@ private class DisplayCameraAction(
         isActive = false
         player.stopSpectatingEntity()
         entity.despawn()
+        entity.remove()
+    }
+
+    override fun retire() {
+        isActive = false
         entity.remove()
     }
 }
@@ -488,8 +537,8 @@ private class TeleportCameraAction(
 
     override suspend fun tickSegment(frame: Int) {
         val position = path.interpolate(frame)
-        Dispatchers.Sync.switchContext {
-            player.teleport(position.toBukkitLocation())
+        player.entityDispatcher.switchContext {
+            foliaScheduler.teleport(player, position.toBukkitLocation()).await()
             player.sendFakeFlight()
         }
     }
@@ -524,7 +573,7 @@ private class BedrockCameraAction(
     override suspend fun startSegment(segment: CameraSegment) {
         setupPath(segment)
         val position = path.first().position
-        player.teleportAsync(position.toBukkitLocation()).await()
+        foliaScheduler.teleport(player, position.toBukkitLocation()).await()
         geyserConnection.setupCamera(cameraLockId)
         geyserConnection.forceCameraPosition(position)
     }
@@ -543,7 +592,7 @@ private class BedrockCameraAction(
         setupPath(newSegment)
         val position = path.first().position
         if (oldPosition.world != position.world) {
-            player.teleportAsync(position.toBukkitLocation()).await()
+            foliaScheduler.teleport(player, position.toBukkitLocation()).await()
         }
         geyserConnection.forceCameraPosition(position)
     }

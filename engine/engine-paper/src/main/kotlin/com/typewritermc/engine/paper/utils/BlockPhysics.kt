@@ -722,7 +722,7 @@ class BlockCollision(private val maxStepHeight: Double = 0.6) {
         rayStart: Vector,
         rayEnd: Vector,
         getter: BukkitBlockGetter,
-        isBlockPassable: ((Block) -> Boolean)? = null
+        isBlockPassable: ((BlockSnapshot) -> Boolean)? = null
     ): Boolean {
         val direction = rayEnd.sub(rayStart)
         val distance = direction.length
@@ -1159,9 +1159,11 @@ interface Shape {
 }
 
 class BukkitBlockShape(
-    val block: Block
+    boxes: Collection<BoundingBox>
 ) : Shape {
-    private val collidedShape by lazy(LazyThreadSafetyMode.NONE) { block.collisionShape }
+    constructor(block: Block) : this(block.collisionShape.boundingBoxes)
+
+    private val collidedShape = CollisionSnapshot(boxes)
 
     override fun intersectBoxSwept(
         rayStart: Point<*>,
@@ -1397,11 +1399,13 @@ class BukkitBlockShape(
     }
 
     override fun toString(): String {
-        return "BukkitBlockShape{block=$block}"
+        return "BukkitBlockShape{boxes=${collidedShape.boundingBoxes}}"
     }
 }
 
 fun Block.collisionShape(): Shape = BukkitBlockShape(this)
+
+fun BlockSnapshot.collisionShape(): Shape = BukkitBlockShape(collisionShape.boundingBoxes)
 
 data class CachedShapeData(
     val shape: Shape,
@@ -1439,8 +1443,9 @@ data class CachedShapeData(
 }
 
 class BukkitBlockGetter(
-    private val world: World,
+    private val world: BlockView,
 ) {
+    constructor(world: World) : this(OwnedBlockView(world))
     private val shapeDataCache = Long2ObjectLinkedOpenHashMap<CachedShapeData>()
 
     /**
@@ -1453,11 +1458,11 @@ class BukkitBlockGetter(
                 (((z + 33554432L) and 0x3FFFFFF) shl 12) or  // 26 bits for Z (33M range)
                 ((y + 2048L) and 0xFFF)                      // 12 bits for Y (2K range)
 
-    fun blockAt(x: Int, y: Int, z: Int): Block {
+    fun blockAt(x: Int, y: Int, z: Int): BlockSnapshot {
         return world.getBlockAt(x, y, z)
     }
 
-    fun blockAt(pos: Vector): Block = blockAt(pos.x.toInt(), pos.y.toInt(), pos.z.toInt())
+    fun blockAt(pos: Vector): BlockSnapshot = blockAt(pos.blockX, pos.blockY, pos.blockZ)
 
     fun cachedShapeData(x: Int, y: Int, z: Int): CachedShapeData {
         val key = blockKey(x, y, z)
@@ -1469,7 +1474,7 @@ class BukkitBlockGetter(
     }
 
     fun cachedShapeData(pos: Vector): CachedShapeData {
-        return cachedShapeData(pos.x.toInt(), pos.y.toInt(), pos.z.toInt())
+        return cachedShapeData(pos.blockX, pos.blockY, pos.blockZ)
     }
 
     fun cachedCollisionShape(x: Int, y: Int, z: Int): Shape {
@@ -1477,7 +1482,7 @@ class BukkitBlockGetter(
     }
 
     fun cachedCollisionShape(pos: Vector): Shape {
-        return cachedCollisionShape(pos.x.toInt(), pos.y.toInt(), pos.z.toInt())
+        return cachedCollisionShape(pos.blockX, pos.blockY, pos.blockZ)
     }
 
     fun clearShapeCache() {

@@ -151,3 +151,6 @@ bin/
 
 .env
 /docs
+
+# Supplied compiled panel fallback; rebuild from app/ for releases.
+/web-assets/

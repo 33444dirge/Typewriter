@@ -5,7 +5,6 @@ import com.typewritermc.core.entries.Ref
 import com.typewritermc.core.entries.emptyRef
 import com.typewritermc.core.extension.annotations.Entry
 import com.typewritermc.core.interaction.context
-import com.typewritermc.core.utils.UntickedAsync
 import com.typewritermc.core.utils.launch
 import com.typewritermc.engine.paper.entry.TriggerableEntry
 import com.typewritermc.engine.paper.entry.entries.AudienceDisplay
@@ -14,12 +13,13 @@ import com.typewritermc.engine.paper.entry.entries.ConstVar
 import com.typewritermc.engine.paper.entry.entries.Var
 import com.typewritermc.engine.paper.entry.triggerFor
 import com.typewritermc.engine.paper.logger
-import kotlinx.coroutines.Dispatchers
+import com.typewritermc.engine.paper.utils.entityDispatcher
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import org.bukkit.entity.Player
 import java.time.Duration
 import java.util.*
+import java.util.concurrent.ConcurrentHashMap
 
 @Entry(
     "timer_audience",
@@ -50,7 +50,7 @@ class TimerAudienceDisplay(
     private val duration: Var<Duration>,
     private val onTimer: Ref<TriggerableEntry>,
 ) : AudienceDisplay() {
-    private val jobs = mutableMapOf<UUID, Job>()
+    private val jobs = ConcurrentHashMap<UUID, Job>()
 
     override fun onPlayerAdd(player: Player) {
         val duration = duration.get(player)
@@ -58,15 +58,24 @@ class TimerAudienceDisplay(
             logger.warning("Timer duration must be positive, otherwise it will infinitely trigger.")
             return
         }
-        jobs[player.uniqueId] = Dispatchers.UntickedAsync.launch {
-            while (player in this@TimerAudienceDisplay) {
-                delay(duration.toMillis())
-                onTimer.triggerFor(player, context())
+        val playerId = player.uniqueId
+        val job = player.entityDispatcher.launch {
+            while (!isClosed && player in this@TimerAudienceDisplay) {
+                delay(duration.toMillis().coerceAtLeast(1L))
+                if (!isClosed && player in this@TimerAudienceDisplay) onTimer.triggerFor(player, context())
             }
         }
+        jobs.put(playerId, job)?.cancel()
+        job.invokeOnCompletion { jobs.remove(playerId, job) }
     }
 
     override fun onPlayerRemove(player: Player) {
-        jobs[player.uniqueId]?.cancel()
+        jobs.remove(player.uniqueId)?.cancel()
+    }
+
+    override fun dispose() {
+        jobs.values.forEach(Job::cancel)
+        jobs.clear()
+        super.dispose()
     }
 }

@@ -15,17 +15,17 @@ import com.typewritermc.engine.paper.entry.entity.*
 import com.typewritermc.engine.paper.entry.entries.EntityProperty
 import com.typewritermc.engine.paper.entry.entries.GenericEntityActivityEntry
 import com.typewritermc.engine.paper.logger
-import com.typewritermc.engine.paper.utils.firstWalkableLocationBelow
-import com.typewritermc.engine.paper.utils.logErrorIfNull
+import com.typewritermc.engine.paper.utils.firstWalkableLocationBelowAsync
+import com.typewritermc.engine.paper.utils.regionDispatcher
+import kotlinx.coroutines.withContext
 import com.typewritermc.engine.paper.utils.toBukkitLocation
 import com.typewritermc.roadnetwork.RoadNetwork
 import com.typewritermc.roadnetwork.RoadNetworkEntry
 import com.typewritermc.roadnetwork.RoadNetworkManager
 import com.typewritermc.roadnetwork.RoadNodeId
+import com.typewritermc.roadnetwork.RoadNode
 import com.typewritermc.roadnetwork.gps.PointToPointGPS
 import kotlinx.coroutines.*
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import org.koin.core.component.KoinComponent
 import org.koin.java.KoinJavaComponent
 import kotlin.time.Duration.Companion.seconds
@@ -64,10 +64,12 @@ class RandomPatrolActivity(
 ) : EntityActivity<ActivityContext>, KoinComponent {
     private var network: RoadNetwork? = null
     private var activity: EntityActivity<in ActivityContext> = IdleActivity(startLocation)
-    private val searchMutex = Mutex()
-    private var searchJob: Job? = null
-
-    @Volatile
+    private class SearchRequest {
+        var job: Job? = null
+        @Volatile var result: SearchResult? = null
+    }
+    private data class SearchResult(val gps: PointToPointGPS?, val destination: RoadNodeId?, val fallback: Position?)
+    private var search: SearchRequest? = null
     private var destination: RoadNodeId? = null
 
     // The network only says its nodes are connected. Whether the entity can walk there is decided per
@@ -78,43 +80,36 @@ class RandomPatrolActivity(
     private var lastAttemptPosition: Position? = null
 
     fun refreshActivity(context: ActivityContext, network: RoadNetwork): TickResult {
-        if (searchMutex.isLocked) return TickResult.CONSUMED
+        if (search != null) return TickResult.CONSUMED
 
+        val start = currentPosition.toPosition()
         val candidateNodes = network.nodes
-            .filter { (it.position.distanceSquared(currentPosition) ?: Double.MAX_VALUE) <= radiusSquared }
-            .toMutableList()
+            .filter { (it.position.distanceSquared(start) ?: Double.MAX_VALUE) <= radiusSquared }
 
         if (candidateNodes.isEmpty()) return TickResult.IGNORED
-
-        val job = Dispatchers.UntickedAsync.launch {
+        val untried = candidateNodes.filterNot { it.id in triedDestinations }
+        if (untried.isEmpty()) triedDestinations.clear()
+        val candidates = untried.ifEmpty { candidateNodes }.toList()
+        val request = SearchRequest()
+        search = request
+        destination = null
+        request.job = Dispatchers.UntickedAsync.launch {
             try {
-                withTimeout(30.seconds) {
-                    searchMutex.withLock {
-                        if (!isActive) return@withLock
-
-                        val gps = findReachableNode(network, currentPosition.toPosition())
-
-                        if (gps != null) {
-                            setNavigationActivity(context, gps)
-                        } else {
-                            setIdleFallbackActivity(context, network, currentPosition.toPosition())
-                        }
-                    }
+                val result = withTimeout(30.seconds) {
+                    findReachableNode(candidates, start)
                 }
+                ensureActive()
+                request.result = result
             } catch (_: TimeoutCancellationException) {
-                logger.warning("Path search timed out after 30 seconds from position: $currentPosition")
+                logger.warning("Path search timed out after 30 seconds from position: $start")
             }
         }
-
-        searchJob = job
-        job.invokeOnCompletion { if (searchJob === job) searchJob = null }
 
         return TickResult.CONSUMED
     }
 
     override fun activate(context: ActivityContext, position: PositionProperty) {
-        searchJob?.cancel()
-        searchJob = null
+        stopSearch()
         activity.dispose()
         activity = IdleActivity(position)
         setup(context)
@@ -134,7 +129,18 @@ class RandomPatrolActivity(
             return TickResult.CONSUMED
         }
 
-        if (searchMutex.isLocked) return TickResult.CONSUMED
+        val request = search
+        if (request != null) {
+            val result = request.result
+            if (result == null && request.job?.isCompleted != true) return TickResult.CONSUMED
+            search = null
+            if (result != null) {
+                destination = result.destination
+                if (result.gps != null) setNavigationActivity(context, result.gps)
+                else setIdleFallbackActivity(context, result.fallback)
+                return TickResult.CONSUMED
+            }
+        }
 
         val result = activity.tick(context)
         if (result == TickResult.IGNORED) {
@@ -159,13 +165,19 @@ class RandomPatrolActivity(
     }
 
     override fun deactivate(context: ActivityContext) {
-        searchJob?.cancel()
-        searchJob = null
+        stopSearch()
         activity.deactivate(context)
     }
 
     override fun dispose() {
+        stopSearch()
         activity.dispose()
+    }
+
+    private fun stopSearch() {
+        val previous = search
+        search = null
+        previous?.job?.cancel()
     }
 
     override val currentPosition: PositionProperty
@@ -175,48 +187,43 @@ class RandomPatrolActivity(
         get() = activity.currentProperties
 
     private suspend fun findReachableNode(
-        network: RoadNetwork,
+        candidates: List<RoadNode>,
         currentPos: Position
-    ): PointToPointGPS? {
-        destination = null
-
-        val nodesInRange = network.nodes
-            .filter { (it.position.distanceSquared(currentPos) ?: Double.MAX_VALUE) <= radiusSquared }
-
-        // Everything in range has been tried from here, so the notes only hold the entity back now.
-        val untriedNodes = nodesInRange.filterNot { it.id in triedDestinations }
-        if (untriedNodes.isEmpty()) triedDestinations.clear()
-
-        val candidateNodes = untriedNodes.ifEmpty { nodesInRange }.toMutableList()
+    ): SearchResult {
+        val candidateNodes = candidates.toMutableList()
 
         var attemptCount = 0
 
         while (candidateNodes.isNotEmpty()) {
+            currentCoroutineContext().ensureActive()
             val nextNode = candidateNodes.removeAt(candidateNodes.indices.random())
             attemptCount++
 
             val gps = PointToPointGPS(roadNetwork, {
-                val raised = if (currentPosition.toBukkitLocation().block.isSolid) {
-                    currentPosition.withY { it + 1 }
+                val raised = if (currentPos.toBukkitLocation().let { target ->
+                    withContext(target.regionDispatcher) { target.block.isSolid }
+                }) {
+                    currentPos.withY { it + 1 }
                 } else {
-                    currentPosition
-                }.toPosition()
-                raised.firstWalkableLocationBelow() ?: raised
+                    currentPos
+                }
+                raised.firstWalkableLocationBelowAsync() ?: raised
             }) { nextNode.position }
 
             try {
                 val pathResult = gps.findPath()
                 if (pathResult.isSuccess) {
-                    destination = nextNode.id
-                    return gps
+                    return SearchResult(gps, nextNode.id, null)
                 }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (_: Exception) {
                 // Try next node
             }
         }
 
-        logger.severe("No reachable nodes found after trying $attemptCount attempts from position: $currentPosition")
-        return null
+        logger.severe("No reachable nodes found after trying $attemptCount attempts from position: $currentPos")
+        return SearchResult(null, null, candidates.randomOrNull()?.position)
     }
 
     private fun setNavigationActivity(context: ActivityContext, gps: PointToPointGPS) {
@@ -227,17 +234,11 @@ class RandomPatrolActivity(
 
     private fun setIdleFallbackActivity(
         context: ActivityContext,
-        network: RoadNetwork,
-        currentPos: Position
+        fallback: Position?,
     ) {
-        val teleportNode = network.nodes
-            .filter { (it.position.distanceSquared(currentPos) ?: Double.MAX_VALUE) <= radiusSquared }
-            .randomOrNull()
-            .logErrorIfNull("No reachable nodes found")
-
         activity.deactivate(context)
         activity.dispose()
-        val newPosition = teleportNode?.position?.toProperty() ?: currentPosition
+        val newPosition = fallback?.toProperty() ?: currentPosition
         activity = IdleActivity(newPosition).also {
             it.activate(context, newPosition)
         }

@@ -16,7 +16,12 @@ import com.typewritermc.engine.paper.plugin
 import com.typewritermc.engine.paper.utils.logErrorIfNull
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.bukkit.entity.Player
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
@@ -29,20 +34,20 @@ class FactDatabase : KoinComponent {
 
     // Local stored version of player facts
     private val cache = ConcurrentHashMap<FactId, FactData>()
+    private val persistenceMutex = Mutex()
+    private var maintenanceJob: Job? = null
 
-    fun initialize() {
-        storage.init()
-
-        // Load all the facts from the storage
-        runBlocking {
+    suspend fun initialize() {
+        withContext(Dispatchers.IO) {
+            storage.init()
             loadFactsFromPersistentStorage()
         }
 
         // Filter expired facts every second.
         // After that, save the facts of the players who have facts that expired or changed.
-        Dispatchers.UntickedAsync.launch {
+        maintenanceJob = Dispatchers.UntickedAsync.launch {
             var cycle = 1
-            while (plugin.isEnabled) {
+            while (isActive && plugin.isEnabled) {
                 delay(1000)
                 removeExpiredFacts()
 
@@ -53,11 +58,13 @@ class FactDatabase : KoinComponent {
         }
     }
 
-    fun shutdown() {
-        runBlocking {
+    suspend fun shutdown() {
+        maintenanceJob?.cancelAndJoin()
+        maintenanceJob = null
+        withContext(Dispatchers.IO) {
             storeFactsInPersistentStorage()
+            storage.shutdown()
         }
-        storage.shutdown()
     }
 
     private suspend fun loadFactsFromPersistentStorage() {
@@ -66,34 +73,25 @@ class FactDatabase : KoinComponent {
         cache.putAll(facts)
     }
 
-    private suspend fun storeFactsInPersistentStorage() {
-        val entries =
-            cache.keys.mapNotNull { Query.findById<PersistableFactEntry>(it.entryId) }.associateBy { it.id }
-
-        // If there are no entries, we don't need to store anything.
-        if (entries.isEmpty()) return
-
-        val facts = cache.entries.filter { (id, data) ->
-            val entry = entries[id.entryId] ?: return@filter false
-
-            // If the fact is not persistable, or it has expired, don't store it.
-            if (!entry.canPersist(id, data)) return@filter false
-            if (entry is ExpirableFactEntry && entry.hasExpired(id, data)) return@filter false
-
-            true
-        }.map { (id, data) -> id to data }
-
+    private suspend fun storeFactsInPersistentStorage() = persistenceMutex.withLock {
+        val entries = Query.find<PersistableFactEntry>().associateBy { it.id }
+        val facts = ArrayList<Pair<FactId, FactData>>()
+        cache.forEach { (id, data) ->
+            val entry = entries[id.entryId] ?: return@forEach
+            if (!entry.canPersist(id, data)) return@forEach
+            if (entry is ExpirableFactEntry && entry.hasExpired(id, data)) return@forEach
+            facts.add(id to data)
+        }
         storage.storeFacts(facts)
     }
 
     private fun removeExpiredFacts() {
-        val expiredIds = cache.entries.mapNotNull { (id, data) ->
-            val entry = Query.findById<ExpirableFactEntry>(id.entryId) ?: return@mapNotNull null
-            if (!entry.hasExpired(id, data)) return@mapNotNull null
-            id
+        val entries = Query.find<ExpirableFactEntry>().associateBy { it.id }
+        if (entries.isEmpty()) return
+        cache.forEach { (id, data) ->
+            val entry = entries[id.entryId] ?: return@forEach
+            if (entry.hasExpired(id, data)) cache.remove(id, data)
         }
-
-        expiredIds.forEach { cache.remove(it) }
     }
 
     internal operator fun get(id: FactId): FactData? = cache[id]
@@ -106,10 +104,37 @@ class FactDatabase : KoinComponent {
         }
     }
 
+    /** The transform must only use immutable fact values; it runs inside a per-key atomic update. */
+    internal fun update(id: FactId, transform: (FactData) -> FactData): FactChange {
+        lateinit var change: FactChange
+        cache.compute(id) { _, previous ->
+            val before = previous ?: FactData(0)
+            val after = transform(before)
+            change = FactChange(before, after)
+            after.takeIf { it.value != 0 }
+        }
+        return change
+    }
+
     fun modify(player: Player, modifiers: List<Modifier>, context: InteractionContext? = player.interactionContext) {
-        modify(player) {
-            modifiers.forEach { modifier ->
-                this[modifier.fact] = when (modifier.operator) {
+        modifiers.forEach { modifier ->
+            val cached = modifier.fact.get() as? CachableFactEntry
+            if (cached != null) {
+                val factId = cached.identifier(player) ?: return@forEach
+                val operand = modifier.value.get(player, context)
+                update(factId) { current ->
+                    if (!cached.canCache(factId, current)) current
+                    else FactData(when (modifier.operator) {
+                        ModifierOperator.ADD -> current.value + operand
+                        ModifierOperator.SUBTRACT -> current.value - operand
+                        ModifierOperator.MULTIPLY -> current.value * operand
+                        ModifierOperator.SET -> operand
+                    })
+                }
+                RefreshFactTrigger(cached.ref()).triggerFor(player, context())
+                return@forEach
+            }
+            val value = when (modifier.operator) {
                     ModifierOperator.ADD, ModifierOperator.SUBTRACT -> {
                         val entry =
                             modifier.fact.get().logErrorIfNull("Could not find ${modifier.fact}") ?: return@forEach
@@ -144,8 +169,8 @@ class FactDatabase : KoinComponent {
                     }
 
                     ModifierOperator.SET -> modifier.value.get(player, context)
-                }
             }
+            modify(player, mapOf(modifier.fact.id to value))
         }
     }
 

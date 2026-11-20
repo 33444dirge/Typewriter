@@ -5,8 +5,7 @@ import de.bsommerfeld.pathetic.api.pathing.processing.CostProcessor
 import de.bsommerfeld.pathetic.api.pathing.processing.context.EvaluationContext
 import de.bsommerfeld.pathetic.api.wrapper.PathPosition
 import de.bsommerfeld.pathetic.api.wrapper.PathVector
-import de.bsommerfeld.pathetic.bukkit.context.BukkitEnvironmentContext
-import de.bsommerfeld.pathetic.bukkit.mapper.BukkitMapper
+import com.typewritermc.roadnetwork.pathfinding.pathetic.SnapshotEnvironmentContext
 import kotlin.math.abs
 import kotlin.math.ceil
 
@@ -97,8 +96,7 @@ class SpaceAwareCostProcessor(
     }
 
     private fun isWall(position: PathPosition, context: EvaluationContext): Boolean {
-        val environmentContext = context.environmentContext as BukkitEnvironmentContext
-        val location = BukkitMapper.toLocation(position, environmentContext.world)
-        return location.block.isSolid
+        val environmentContext = context.environmentContext as SnapshotEnvironmentContext
+        return environmentContext.world.getBlockAt(position.flooredX, position.flooredY, position.flooredZ).isSolid
     }
 }

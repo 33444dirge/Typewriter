@@ -12,6 +12,7 @@ import com.typewritermc.engine.paper.entry.AudienceManager
 import com.typewritermc.engine.paper.events.AsyncEntityDefinitionInteract
 import com.typewritermc.engine.paper.events.AsyncFakeEntityInteract
 import com.typewritermc.engine.paper.plugin
+import com.typewritermc.engine.paper.utils.foliaScheduler
 import me.tofaa.entitylib.APIConfig
 import me.tofaa.entitylib.EntityLib
 import me.tofaa.entitylib.spigot.SpigotEntityLibPlatform
@@ -36,13 +37,21 @@ class EntityHandler : PacketListenerAbstract(), KoinComponent {
         val interaction = event.entityInteraction() ?: return
 
         val player = event.getPlayer<Player>()
+        val playerId = event.user.uuid
+        foliaScheduler.atEntity(player, {
+            handleInteraction(player, playerId, interaction)
+        }, null, 1L)
+    }
+
+    private fun handleInteraction(player: Player, playerId: java.util.UUID, interaction: EntityInteraction) {
         val entityId = interaction.entityId
+        val shift = interaction.shift ?: player.isSneaking
 
         AsyncFakeEntityInteract(player, entityId, interaction.hand, interaction.action).callEvent()
 
         val display = audienceManager
             .findDisplays(AudienceEntityDisplay::class)
-            .firstOrNull { it.playerSeesEntity(event.user.uuid, entityId) } ?: return
+            .firstOrNull { it.playerSeesEntity(playerId, entityId) } ?: return
 
         val definition = display.definition ?: return
         val instance = display.instanceEntryRef.get() ?: return
@@ -53,7 +62,7 @@ class EntityHandler : PacketListenerAbstract(), KoinComponent {
             instance,
             interaction.hand,
             interaction.action,
-            interaction.shift,
+            shift,
         ).callEvent()
     }
 
@@ -67,7 +76,7 @@ private data class EntityInteraction(
     val entityId: Int,
     val hand: InteractionHand,
     val action: InteractAction,
-    val shift: Boolean,
+    val shift: Boolean?,
 )
 
 /**
@@ -88,7 +97,7 @@ private fun PacketReceiveEvent.entityInteraction(): EntityInteraction? = when (p
             it.entityId,
             InteractionHand.MAIN_HAND,
             InteractAction.ATTACK,
-            getPlayer<Player>().isSneaking,
+            null,
         )
     }
 

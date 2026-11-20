@@ -8,17 +8,19 @@ import com.github.retrooper.packetevents.protocol.chat.message.ChatMessage_v1_19
 import com.github.retrooper.packetevents.protocol.nbt.NBTLimiter
 import com.github.retrooper.packetevents.protocol.nbt.codec.NBTCodec
 import com.github.retrooper.packetevents.protocol.packettype.PacketType
+import com.github.retrooper.packetevents.protocol.player.User
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerChatMessage
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerDisguisedChat
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerSystemChatMessage
-import com.github.shynixn.mccoroutine.bukkit.registerSuspendingEvents
 import com.google.common.cache.CacheBuilder
 import com.typewritermc.engine.paper.extensions.packetevents.sendPacketTo
+import com.typewritermc.engine.paper.logger
 import com.typewritermc.engine.paper.plugin
 import com.typewritermc.engine.paper.snippets.snippet
 import com.typewritermc.engine.paper.utils.plainText
 import com.typewritermc.engine.paper.utils.server
 import io.netty.buffer.ByteBuf
+import io.netty.channel.Channel
 import net.kyori.adventure.text.Component
 import net.kyori.adventure.text.TextComponent
 import net.kyori.adventure.text.TranslatableComponent
@@ -28,13 +30,16 @@ import org.bukkit.event.EventHandler
 import org.bukkit.event.EventPriority
 import org.bukkit.event.Listener
 import org.bukkit.event.player.PlayerQuitEvent
+import org.bukkit.event.player.PlayerJoinEvent
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
 import org.koin.java.KoinJavaComponent.get
 import java.time.Duration
 import java.util.*
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
 import kotlin.math.min
 
@@ -44,6 +49,11 @@ private val darkenLimit by snippet(
     "The amount of messages displayed in the chat history during a dialogue"
 )
 private val spacing by snippet("chat.spacing", 3, "The amount of padding between the dialogue and the chat history")
+private val historyLimit by snippet("chat.history-limit", 100, "每玩家聊天历史条数上限，范围20至1000；溢出的待发签名消息会先发送。")
+private val historyBytes by snippet("chat.history-bytes", 4_194_304, "每玩家聊天历史估算字节上限，范围1048576至16777216；用于限制长对话缓存。")
+
+private val pendingPacketLimit by snippet("chat.pending-packet-limit", 512, "每玩家待发签名聊天包上限（16–8192）；异常积压超限时断开该玩家连接，避免签名乱序和内存持续增长。")
+private val pendingByteLimit by snippet("chat.pending-byte-limit", 4_194_304, "每玩家待发签名聊天包估算字节上限（65536–16777216）；按至少256字节计一个包，非实际堆内存精确值。")
 
 private const val NBT_SIZE_LIMIT = 870_400 // ~850KB (out of 1MB limit)
 
@@ -82,13 +92,12 @@ class ResendTokenRegistry {
 
     fun consume(recipientId: UUID, message: Component): Boolean {
         val token = MessageToken.of(recipientId, message)
-
-        return tokenCountsCache.getIfPresent(token)?.let { count ->
-            if (count.decrementAndGet() <= 0) {
-                tokenCountsCache.invalidate(token)
-            }
-            true
-        } ?: false
+        var consumed = false
+        tokenCountsCache.asMap().computeIfPresent(token) { _, count ->
+            consumed = true
+            count.takeIf { it.decrementAndGet() > 0 }
+        }
+        return consumed
     }
 }
 
@@ -99,31 +108,34 @@ class ChatHistoryHandler :
 
     fun initialize() {
         PacketEvents.getAPI().eventManager.registerListener(this)
-        server.pluginManager.registerSuspendingEvents(this, plugin)
+        server.pluginManager.registerEvents(this, plugin)
+        server.onlinePlayers.forEach { getHistory(it.uniqueId) }
     }
 
-    private val histories = mutableMapOf<UUID, ChatHistory>()
+    private val histories = ConcurrentHashMap<UUID, ChatHistory>()
 
     // When the server sends a message to the player
     override fun onPacketSend(event: PacketSendEvent?) {
         try {
             if (event == null) return
+            val playerId = event.user.uuid ?: return
+            val history = histories[playerId] ?: return
             val message = findMessage(event) ?: return
             val component = message.message
-            val history = getHistory(event.user.uuid)
 
             if (component is TextComponent && component.content().startsWith("no-index")) {
                 history.allowedMessageThrough()
                 return
             }
 
-            if (resendTokenRegistry.consume(event.user.uuid, component)) {
+            if (resendTokenRegistry.consume(playerId, component)) {
                 return
             }
 
             if (component.shouldSaveMessage()) {
-                val nbtSize = measurePacketNBTSize(event)
+                val nbtSize = max(measurePacketNBTSize(event), (event.byteBuf as ByteBuf).writerIndex())
                 history.addMessage(message.withEstimatedSize(nbtSize))
+                history.drainPackets(event.user, resendTokenRegistry)
             }
 
             if (history.shouldBlockMessage()) {
@@ -208,7 +220,15 @@ class ChatHistoryHandler :
     }
 
     fun getHistory(pid: UUID): ChatHistory {
-        return histories.getOrPut(pid) { ChatHistory() }
+        return histories.computeIfAbsent(pid) {
+            ChatHistory(
+                maxMessages = historyLimit.coerceIn(20, 1000),
+                maxBytes = historyBytes.coerceIn(1_048_576, 16_777_216),
+                maxPendingPackets = pendingPacketLimit.coerceIn(16, 8192),
+                maxPendingBytes = pendingByteLimit.coerceIn(65_536, 16_777_216),
+                onOverflow = { logger.warning("Signed chat backlog limit exceeded for ${it.uuid}; closing connection") },
+            )
+        }
     }
 
     fun getHistory(player: Player): ChatHistory = getHistory(player.uniqueId)
@@ -223,11 +243,19 @@ class ChatHistoryHandler :
 
     @EventHandler(priority = EventPriority.MONITOR)
     fun onQuit(event: PlayerQuitEvent) {
-        histories.remove(event.player.uniqueId)
+        histories.remove(event.player.uniqueId)?.close()
+    }
+
+    @EventHandler(priority = EventPriority.LOWEST)
+    fun onJoin(event: PlayerJoinEvent) {
+        getHistory(event.player.uniqueId)
     }
 
     fun shutdown() {
         PacketEvents.getAPI().eventManager.unregisterListener(this)
+        org.bukkit.event.HandlerList.unregisterAll(this)
+        histories.values.forEach(ChatHistory::close)
+        histories.clear()
     }
 }
 
@@ -237,18 +265,52 @@ val Player.chatHistory: ChatHistory
 fun Player.startBlockingMessages() = chatHistory.startBlocking()
 fun Player.stopBlockingMessages() = chatHistory.stopBlocking()
 
-class ChatHistory {
+class ChatHistory(
+    private val maxMessages: Int = historyLimit.coerceIn(20, 1000),
+    private val maxBytes: Int = historyBytes.coerceIn(1_048_576, 16_777_216),
+) {
+    private var maxPendingPackets: Int = 512
+    private var maxPendingBytes: Int = 4_194_304
+    private var onOverflow: (User) -> Unit = {}
+
+    internal constructor(
+        maxMessages: Int,
+        maxBytes: Int,
+        maxPendingPackets: Int,
+        maxPendingBytes: Int,
+        onOverflow: (User) -> Unit = {},
+    ) : this(maxMessages, maxBytes) {
+        require(maxPendingPackets > 0 && maxPendingBytes > 0)
+        this.maxPendingPackets = maxPendingPackets
+        this.maxPendingBytes = maxPendingBytes
+        this.onOverflow = onOverflow
+    }
+
     private val messages = ConcurrentLinkedQueue<Message>()
+    private val stateLock = Any()
+    @Volatile
     private var blocking = false
     private var blockingState: BlockingStatus = BlockingStatus.FullBlocking
+    private var retainedBytes = 0L
+    private var messageCount = 0
+    private val pendingPackets = ArrayDeque<PendingChatMessage>()
+    private var pendingBytes = 0L
+    @Volatile private var overflowed = false
+    private val overflowDisconnected = AtomicBoolean()
+    private val draining = AtomicBoolean()
+    @Volatile private var closed = false
 
-    fun startBlocking() {
-        if (blocking) return
+    init {
+        require(maxMessages > 0 && maxBytes > 0 && maxPendingPackets > 0 && maxPendingBytes > 0)
+    }
+
+    fun startBlocking() = synchronized(stateLock) {
+        if (blocking) return@synchronized
         blockingState = BlockingStatus.PartialBlocking(0)
         blocking = true
     }
 
-    fun stopBlocking() {
+    fun stopBlocking() = synchronized(stateLock) {
         blocking = false
     }
 
@@ -258,45 +320,136 @@ class ChatHistory {
     // individual messages passed here will not exceed NBT_SIZE_LIMIT.
     // However, when messages are merged into batches elsewhere, those batches might exceed the limit,
     // which is why batching logic exists outside this function.
-    internal fun addMessage(message: Message) {
+    internal fun addMessage(message: Message): Unit = synchronized(stateLock) {
+        if (closed) return@synchronized
         message.onAddedToHistory(blocking)
         if (blocking) {
             blockingState = blockingState.addMessage()
         }
         messages.add(message)
-        while (messages.size > 100 && messages.peek().canDelete) {
-            messages.poll()
+        messageCount++
+        retainedBytes += message.estimatedNBTSize.coerceAtLeast(0)
+        while (!closed && (messageCount > maxMessages || retainedBytes > maxBytes)) {
+            val removed = messages.poll() ?: break
+            messageCount--
+            retainedBytes -= removed.estimatedNBTSize.coerceAtLeast(0)
+            if (removed is Message.PlayerMessage) {
+                queuePacket(removed)
+            }
         }
+    }
+
+    private fun queuePacket(message: Message.PlayerMessage): Boolean {
+        val packet = message.takePendingPacket() ?: return false
+        val bytes = message.estimatedNBTSize.coerceAtLeast(256)
+        if (pendingPackets.size >= maxPendingPackets || pendingBytes + bytes > maxPendingBytes) {
+            overflowed = true
+            closed = true
+            clear()
+            clearPending()
+        } else {
+            pendingPackets.addLast(PendingChatMessage(message.message, packet, bytes))
+            pendingBytes += bytes
+        }
+        return true
+    }
+
+    internal fun sendSignedMessage(message: Message.PlayerMessage, user: User, registry: ResendTokenRegistry): Boolean {
+        val queued = synchronized(stateLock) { !closed && queuePacket(message) }
+        if (queued || overflowed) drainPackets(user, registry)
+        return queued || overflowed
+    }
+
+    internal fun drainPackets(user: User, registry: ResendTokenRegistry) {
+        if (!overflowed && !hasPending()) return
+        val channel = user.channel as Channel
+        if (overflowed) {
+            if (overflowDisconnected.compareAndSet(false, true)) {
+                try { onOverflow(user) } finally { channel.close() }
+            }
+            return
+        }
+        if (!hasPending() || !draining.compareAndSet(false, true)) return
+        val action = Runnable {
+            try {
+                if (!closed && channel.isActive) {
+                    repeat(256) {
+                        val pending = pollPending() ?: return@Runnable
+                        registry.issue(user.uuid, pending.component)
+                        user.sendPacket(pending.packet)
+                    }
+                } else synchronized(stateLock) { clearPending() }
+            } finally {
+                draining.set(false)
+                if (hasPending()) {
+                    try {
+                        channel.eventLoop().execute { drainPackets(user, registry) }
+                    } catch (_: java.util.concurrent.RejectedExecutionException) {
+                        synchronized(stateLock) { clearPending() }
+                    }
+                }
+            }
+        }
+        try {
+            if (channel.eventLoop().inEventLoop()) action.run() else channel.eventLoop().execute(action)
+        } catch (error: java.util.concurrent.RejectedExecutionException) {
+            synchronized(stateLock) { clearPending() }
+            draining.set(false)
+        }
+    }
+
+    internal fun close() = synchronized(stateLock) {
+        closed = true
+        clear()
+        clearPending()
+    }
+
+    private fun hasPending(): Boolean = synchronized(stateLock) { !closed && pendingPackets.isNotEmpty() }
+
+    private fun pollPending(): PendingChatMessage? = synchronized(stateLock) {
+        pendingPackets.pollFirst()?.also { pendingBytes -= it.estimatedBytes }
+    }
+
+    private fun clearPending() {
+        pendingPackets.clear()
+        pendingBytes = 0L
     }
 
     fun hasMessage(message: Component): Boolean {
         return messages.any { it.message == message }
     }
 
-    fun clear() {
+    fun clear() = synchronized(stateLock) {
         messages.clear()
+        retainedBytes = 0L
+        messageCount = 0
+        blockingState = BlockingStatus.FullBlocking
     }
 
-    fun allowedMessageThrough() {
+    fun allowedMessageThrough() = synchronized(stateLock) {
         blockingState = BlockingStatus.FullBlocking
     }
 
     private fun clearMessage() = "\n".repeat(100 - min(messages.size, darkenLimit))
 
     fun resendMessages(player: Player, clear: Boolean = true) {
-        when (val status = blockingState) {
+        val (status, snapshot) = synchronized(stateLock) {
+            val status = blockingState
+            blockingState = BlockingStatus.PartialBlocking(0)
+            status to messages.toList()
+        }
+        when (status) {
             is BlockingStatus.FullBlocking -> {
-                resendMessagesWithSizeCheck(player, clear)
+                resendMessagesWithSizeCheck(player, clear, snapshot)
             }
 
             is BlockingStatus.PartialBlocking -> {
-                messages.toList().takeLast(status.newMessages).forEach { it.send(player) }
+                snapshot.takeLast(status.newMessages).forEach { it.send(player) }
             }
         }
-        blockingState = BlockingStatus.PartialBlocking(0)
     }
 
-    private fun resendMessagesWithSizeCheck(player: Player, clear: Boolean) {
+    private fun resendMessagesWithSizeCheck(player: Player, clear: Boolean, snapshot: List<Message>) {
         var currentBatch = if (clear) {
             Message.TextMessage(Component.text(clearMessage()))
         } else {
@@ -305,7 +458,7 @@ class ChatHistory {
 
         var currentSize = currentBatch.estimatedNBTSize
 
-        for (message in messages) {
+        for (message in snapshot) {
             if (message.canMerge) {
                 val messageSize = message.estimatedNBTSize
 
@@ -352,6 +505,12 @@ class ChatHistory {
         return msg.append(message)
     }
 }
+
+internal data class PendingChatMessage(
+    val component: Component,
+    val packet: WrapperPlayServerChatMessage,
+    val estimatedBytes: Int,
+)
 
 sealed interface BlockingStatus {
     fun addMessage(): BlockingStatus
@@ -436,12 +595,12 @@ internal interface Message : KoinComponent {
 
     data class PlayerMessage(
         override val message: Component,
-        var packet: WrapperPlayServerChatMessage?,
+        @Volatile var packet: WrapperPlayServerChatMessage?,
         override val estimatedNBTSize: Int = 0
     ) : Message {
         private val resendTokenRegistry: ResendTokenRegistry by inject()
-        override val canMerge: Boolean = packet == null
-        override val canDelete: Boolean = packet == null
+        override val canMerge: Boolean get() = packet == null
+        override val canDelete: Boolean get() = packet == null
 
         override val darkenMessage: Component by lazy(LazyThreadSafetyMode.NONE) {
             Component.text("${message.plainText()}\n").color(TextColor.color(0x7d8085))
@@ -454,13 +613,15 @@ internal interface Message : KoinComponent {
         }
 
         override fun send(player: Player) {
-            resendTokenRegistry.issue(player.uniqueId, message)
-            if (packet != null) {
-                packet!!.sendPacketTo(player)
-                packet = null // Clear the packet to prevent resending
-            } else {
+            val user = PacketEvents.getAPI().playerManager.getUser(player) ?: return
+            if (!player.chatHistory.sendSignedMessage(this, user, resendTokenRegistry)) {
+                resendTokenRegistry.issue(player.uniqueId, message)
                 player.resend(message)
             }
+        }
+
+        internal fun takePendingPacket(): WrapperPlayServerChatMessage? = synchronized(this) {
+            packet.also { packet = null }
         }
 
         override fun withEstimatedSize(size: Int): Message = copy(estimatedNBTSize = size)

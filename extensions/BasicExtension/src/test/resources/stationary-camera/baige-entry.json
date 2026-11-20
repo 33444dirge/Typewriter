@@ -1,0 +1,43 @@
+{
+  "id": "jj_baige_stationary_camera",
+  "name": "白给姐原地镜头",
+  "type": "stationary_camera_cinematic",
+  "_genericBlueprint": null,
+  "criteria": [],
+  "worldName": "worlds_lobby",
+  "maxDistance": 96.0,
+  "unavailableMessage": "<yellow>镜头暂时无法播放，请在 worlds_lobby 的白给姐附近站稳，等待区块加载后再试。</yellow>",
+  "segments": [
+    {
+      "startFrame": 0,
+      "endFrame": 140,
+      "start": {
+        "world": "worlds_lobby",
+        "x": 35,
+        "y": 83,
+        "z": 28,
+        "yaw": 0.0,
+        "pitch": 0.0
+      },
+      "end": {
+        "world": "worlds_lobby",
+        "x": 39,
+        "y": 83,
+        "z": 34,
+        "yaw": 0.0,
+        "pitch": 0.0
+      },
+      "lookAt": {
+        "world": "worlds_lobby",
+        "x": 40,
+        "y": 82,
+        "z": 29,
+        "yaw": 0.0,
+        "pitch": 0.0
+      },
+      "moveFrames": 40,
+      "eyeOffset": 1.6,
+      "targetOffset": 1.6
+    }
+  ]
+}

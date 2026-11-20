@@ -11,6 +11,7 @@ import com.typewritermc.engine.paper.entry.temporal.SimpleCinematicAction
 import com.typewritermc.engine.paper.extensions.placeholderapi.parsePlaceholders
 import com.typewritermc.engine.paper.plugin
 import com.typewritermc.engine.paper.utils.Sync
+import com.typewritermc.engine.paper.utils.entityDispatcher
 import kotlinx.coroutines.Dispatchers
 import org.bukkit.entity.Player
 
@@ -97,22 +98,27 @@ class CommandAction(
     entry: CinematicCommandEntry,
     private val run: (String) -> Unit,
 ) : SimpleCinematicAction<CommandSegment>() {
+    private val entryIsConsole = entry is CinematicConsoleCommandEntry
     override val segments: List<CommandSegment> = entry.segments
 
     override suspend fun startSegment(segment: CommandSegment) {
         super.startSegment(segment)
         if (segment.command.isBlank()) return
-        Dispatchers.Sync.switchContext {
+        player.entityDispatcher.switchContext {
+            val commands = segment.command.parsePlaceholders(player).lines().filter { it.isNotBlank() }
+            if (entryIsConsole) {
+                Dispatchers.Sync.switchContext { commands.forEach(run) }
+                return@switchContext
+            }
             val attachment = if (segment.sudo) {
                 player.addAttachment(plugin)
             } else null
             attachment?.setPermission("*", true)
-            segment.command.parsePlaceholders(player)
-                .lines()
-                .filter { it.isNotBlank() }
-                .forEach(run)
-
-            attachment?.remove()
+            try {
+                commands.forEach(run)
+            } finally {
+                attachment?.remove()
+            }
         }
     }
 }

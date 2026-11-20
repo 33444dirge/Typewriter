@@ -18,6 +18,9 @@ import org.bukkit.event.player.PlayerInteractEvent
 import org.bukkit.event.player.PlayerSwapHandItemsEvent
 import org.bukkit.event.player.PlayerToggleSneakEvent
 import org.bukkit.inventory.EquipmentSlot
+import com.typewritermc.engine.paper.utils.foliaScheduler
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.UUID
 
 /**
  * How key presses are picked up from a player.
@@ -71,17 +74,24 @@ class PlayerInputConfirmationInput(private val player: Player) : ConfirmationInp
 
     override fun listen(key: ConfirmationKey, onPress: () -> Unit): ConfirmationRegistration {
         require(key in available) { "The player input packet does not carry $key" }
-        var wasPressed = false
+        val wasPressed = AtomicBoolean()
+        val active = AtomicBoolean(true)
         val bundle = player.interceptPackets {
             Play.Client.PLAYER_INPUT { event ->
                 val packet = WrapperPlayClientPlayerInput(event)
                 val pressed = if (key == ConfirmationKey.JUMP) packet.isJump else packet.isShift
                 // The packet carries every input at once, so it is resent while the key is held down.
-                if (pressed && !wasPressed) onPress()
-                wasPressed = pressed
+                if (pressed && !wasPressed.getAndSet(pressed)) {
+                    foliaScheduler.atEntity(player, { if (active.get()) onPress() }, null, 1L)
+                } else if (!pressed) {
+                    wasPressed.set(false)
+                }
             }
         }
-        return ConfirmationRegistration { bundle.cancel() }
+        return ConfirmationRegistration {
+            active.set(false)
+            bundle.cancel()
+        }
     }
 }
 
@@ -108,13 +118,13 @@ private class SwapHandsHandler(override val player: Player, override val onPress
 }
 
 private class JumpHandler(override val player: Player, override val onPress: () -> Unit) : KeyHandler {
-    private val key = NamespacedKey(plugin, "jump_confirmation")
+    private val key = NamespacedKey(plugin, "jump_confirmation/${UUID.randomUUID()}")
 
     override fun initialize() {
         super.initialize()
         player.getAttribute(Attribute.JUMP_STRENGTH)?.let { attribute ->
-            attribute.removeModifier(key)
-            attribute.addModifier(AttributeModifier(key, -0.999, AttributeModifier.Operation.MULTIPLY_SCALAR_1))
+            attribute.removeModifier(NamespacedKey(plugin, "jump_confirmation"))
+            attribute.addTransientModifier(AttributeModifier(key, -0.999, AttributeModifier.Operation.MULTIPLY_SCALAR_1))
         }
     }
 
@@ -126,7 +136,9 @@ private class JumpHandler(override val player: Player, override val onPress: () 
 
     override fun dispose() {
         super.dispose()
-        player.getAttribute(Attribute.JUMP_STRENGTH)?.removeModifier(key)
+        val remove = Runnable { player.getAttribute(Attribute.JUMP_STRENGTH)?.removeModifier(key) }
+        if (foliaScheduler.owns(player)) remove.run()
+        else foliaScheduler.atEntity(player, remove, null, 1L)
     }
 }
 

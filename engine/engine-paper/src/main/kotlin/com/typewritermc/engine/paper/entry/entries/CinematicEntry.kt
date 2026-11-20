@@ -46,6 +46,11 @@ infix fun Segment.canFinishAt(frame: Int): Boolean = frame > endFrame
 
 val Segment.duration: Int get() = endFrame - startFrame
 
+/** Releases packet listeners and virtual entities without awaiting an owner that may have retired. */
+interface RetirableCinematicAction {
+    fun retire()
+}
+
 interface CinematicAction {
     /**
      * Called when the cinematic starts

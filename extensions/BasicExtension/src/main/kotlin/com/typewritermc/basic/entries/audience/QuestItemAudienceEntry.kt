@@ -8,7 +8,7 @@ import com.typewritermc.core.extension.annotations.Entry
 import com.typewritermc.core.extension.annotations.Help
 import com.typewritermc.core.utils.launch
 import com.typewritermc.engine.paper.entry.entries.*
-import com.typewritermc.engine.paper.utils.Sync
+import com.typewritermc.engine.paper.utils.entityDispatcher
 import com.typewritermc.engine.paper.utils.item.Item
 import io.papermc.paper.event.player.PlayerItemFrameChangeEvent
 import kotlinx.coroutines.Dispatchers
@@ -73,19 +73,17 @@ class QuestItemAudienceDisplay(
     private var ticks = 0
 
     override fun onPlayerAdd(player: Player) {
-        Dispatchers.Sync.launch { reconcile(player) }
+        reconcile(player)
     }
 
     override fun onPlayerRemove(player: Player) {
-        Dispatchers.Sync.launch { stock.takeBack(player) }
+        stock.takeBack(player)
     }
 
     /** The pass that hands the item out and catches whatever got past the refusals, a /clear or a plugin. */
     override fun tick() {
         if (++ticks % RECONCILE_INTERVAL_TICKS != 0) return
-        val audience = players
-        if (audience.isEmpty()) return
-        Dispatchers.Sync.launch { audience.forEach(::reconcile) }
+        forEachPlayer(::reconcile)
     }
 
     /**
@@ -126,7 +124,7 @@ class QuestItemAudienceDisplay(
     private fun guardCreativeWrite(event: InventoryCreativeEvent, player: Player) {
         if (!event.currentItem.carriesQuestItemOf(ref) && !event.cursor.carriesQuestItemOf(ref)) return
         event.isCancelled = true
-        Dispatchers.Sync.launch { player.updateInventory() }
+        player.entityDispatcher.launch { player.updateInventory() }
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)

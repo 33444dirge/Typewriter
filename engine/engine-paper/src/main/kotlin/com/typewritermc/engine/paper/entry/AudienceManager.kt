@@ -5,6 +5,7 @@ import com.typewritermc.core.entries.Ref
 import com.typewritermc.core.entries.ref
 import com.typewritermc.core.utils.Reloadable
 import com.typewritermc.core.utils.UntickedAsync
+import com.typewritermc.core.utils.TypewriterCoroutineLifetime
 import com.typewritermc.engine.paper.entry.entries.*
 import com.typewritermc.engine.paper.logger
 import com.typewritermc.engine.paper.plugin
@@ -30,9 +31,9 @@ import kotlin.time.measureTime
 
 class AudienceManager : Listener, Reloadable, KoinComponent {
     private val isEnabled by inject<Boolean>(named("isEnabled"))
-    private var displays = emptyMap<Ref<out AudienceEntry>, AudienceDisplay>()
-    private var parents = emptyMap<Ref<out AudienceEntry>, List<Ref<out AudienceFilterEntry>>>()
-    private var roots = emptyList<Ref<out AudienceEntry>>()
+    @Volatile private var displays = emptyMap<Ref<out AudienceEntry>, AudienceDisplay>()
+    @Volatile private var parents = emptyMap<Ref<out AudienceEntry>, List<Ref<out AudienceFilterEntry>>>()
+    @Volatile private var roots = emptyList<Ref<out AudienceEntry>>()
 
     private var coroutineScope: CoroutineScope? = null
 
@@ -64,7 +65,7 @@ class AudienceManager : Listener, Reloadable, KoinComponent {
 
         displays = entries.associate { it.ref() to it.display() }
 
-        coroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.UntickedAsync)
+        coroutineScope = CoroutineScope(SupervisorJob(TypewriterCoroutineLifetime.parent) + Dispatchers.UntickedAsync)
 
         for ((ref, display) in displays) {
             if (display !is TickableDisplay) continue
@@ -160,11 +161,14 @@ class AudienceManager : Listener, Reloadable, KoinComponent {
     fun getParents(ref: Ref<out AudienceEntry>): List<Ref<out AudienceFilterEntry>> = parents[ref] ?: emptyList()
 
     override suspend fun unload() {
-        coroutineScope?.cancel()
+        coroutineScope?.coroutineContext?.get(Job)?.cancelAndJoin()
         coroutineScope = null
         val displays = displays
+        displays.values.forEach { it.beginClose() }
+        displays.values.forEach { it.close() }
         this.displays = emptyMap()
-        displays.values.forEach { it.dispose() }
+        parents = emptyMap()
+        roots = emptyList()
     }
 
     @EventHandler

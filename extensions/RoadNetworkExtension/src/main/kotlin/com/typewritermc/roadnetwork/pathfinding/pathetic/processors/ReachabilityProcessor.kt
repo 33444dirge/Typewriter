@@ -14,10 +14,10 @@ import com.typewritermc.roadnetwork.pathfinding.pathetic.properties.PathNodeProp
 import de.bsommerfeld.pathetic.api.pathing.processing.ValidationProcessor
 import de.bsommerfeld.pathetic.api.pathing.processing.context.EvaluationContext
 import de.bsommerfeld.pathetic.api.wrapper.PathPosition
-import de.bsommerfeld.pathetic.bukkit.context.BukkitEnvironmentContext
+import com.typewritermc.roadnetwork.pathfinding.pathetic.SnapshotEnvironmentContext
 import org.bukkit.Location
 import org.bukkit.World
-import org.bukkit.block.Block
+import com.typewritermc.engine.paper.utils.BlockSnapshot
 import org.bukkit.block.data.Openable
 import org.bukkit.util.BoundingBox
 import kotlin.math.ceil
@@ -165,7 +165,7 @@ class ReachabilityProcessor(
         parentGroundY: Double,
         currentGroundY: Double
     ): Boolean {
-        val world = (context.environmentContext as? BukkitEnvironmentContext)?.world ?: return false
+        val world = (context.environmentContext as? SnapshotEnvironmentContext)?.world ?: return false
 
         val deltaY = currentGroundY - parentGroundY
         val isJump = deltaY > capabilities.maxStepHeight
@@ -176,12 +176,13 @@ class ReachabilityProcessor(
             parentGroundY
         }
 
-        val startPosition = Location(
-            world,
+        val startPosition = PositionProperty(
+            com.typewritermc.core.utils.point.World((context.environmentContext as SnapshotEnvironmentContext).worldId),
             parentPos.x + 0.5,
             startY,
-            parentPos.z + 0.5
-        ).toProperty()
+            parentPos.z + 0.5,
+            0f, 0f,
+        )
 
         val baseEndPoint = Vector(
             context.currentPathPosition.x + 0.5,
@@ -210,7 +211,7 @@ class ReachabilityProcessor(
     private fun performCollisionCheck(
         velocity: Vector,
         startPosition: PositionProperty,
-        world: World,
+        world: com.typewritermc.engine.paper.utils.BlockView,
         currentGroundY: Double,
         isJump: Boolean,
         sidestepInfo: SidestepInfo? = null
@@ -277,7 +278,7 @@ class ReachabilityProcessor(
             Vector(-halfWidth, height, 0.0)
         )
 
-        val isBlockPassablePredicate: (Block) -> Boolean = { block ->
+        val isBlockPassablePredicate: (BlockSnapshot) -> Boolean = { block ->
             isBlockPassable(block)
         }
 
@@ -292,12 +293,12 @@ class ReachabilityProcessor(
         val properties = NodeTypeProcessor.cachedProperties(context, pos)
         if (properties?.let { isPassable(it) } == true) return true
 
-        val world = (context.environmentContext as? BukkitEnvironmentContext)?.world ?: return false
-        val block = world.getBlockAt(pos.x.toInt(), pos.y.toInt(), pos.z.toInt())
+        val world = (context.environmentContext as? SnapshotEnvironmentContext)?.world ?: return false
+        val block = world.getBlockAt(pos.flooredX, pos.flooredY, pos.flooredZ)
         return isEntityCenterFreeOfCollision(block)
     }
 
-    private fun isEntityCenterFreeOfCollision(block: Block): Boolean {
+    private fun isEntityCenterFreeOfCollision(block: BlockSnapshot): Boolean {
         val halfWidth = capabilities.width / 2.0
         val entityMin = 0.5 - halfWidth
         val entityMax = 0.5 + halfWidth
@@ -313,8 +314,8 @@ class ReachabilityProcessor(
                 (properties.contains(PathNodeProperty.OPENABLE) && capabilities.canInteract) ||
                 properties.contains(PathNodeProperty.OPEN)
 
-    private fun isBlockPassable(block: Block): Boolean =
-        !block.type.isSolid || (block.blockData is Openable && capabilities.canInteract) || (block.blockData is Openable && (block.blockData as Openable).isOpen)
+    private fun isBlockPassable(block: BlockSnapshot): Boolean =
+        !block.isSolid || (block.blockData is Openable && capabilities.canInteract) || (block.blockData is Openable && (block.blockData as Openable).isOpen)
 
     private fun createRelativeEntityBoundingBox(): BoundingBox {
         val halfWidth = capabilities.width / 2.0

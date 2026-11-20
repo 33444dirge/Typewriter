@@ -3,7 +3,6 @@ package com.typewritermc.engine.paper.entry.entity
 import com.typewritermc.core.entries.Ref
 import com.typewritermc.core.utils.point.Position
 import com.typewritermc.engine.paper.entry.entries.*
-import com.typewritermc.engine.paper.utils.server
 import org.bukkit.entity.Player
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
@@ -20,6 +19,12 @@ class GroupAudienceEntityDisplay(
 ) : AudienceFilter(instanceEntryRef), TickableDisplay, AudienceEntityDisplay {
     private val activityManagers = ConcurrentHashMap<GroupId, ActivityManager<in SharedActivityContext>>()
     private val entities = ConcurrentHashMap<UUID, DisplayEntity>()
+    private val memberships = ConcurrentHashMap<UUID, GroupId>()
+    private data class DisplayMembership(
+        val groupId: GroupId,
+        val manager: ActivityManager<in SharedActivityContext>,
+    )
+    private val displayedMemberships = ConcurrentHashMap<UUID, DisplayMembership>()
 
     /**
      * When nobody can see the entity, but it is still active, there is no way to get the state for the entity.
@@ -29,11 +34,21 @@ class GroupAudienceEntityDisplay(
 
 
     private fun groupViewers(groupId: GroupId): List<Player> {
-        return players.filter { group.groupId(it) == groupId }
+        return players.filter { memberships[it.uniqueId] == groupId }
     }
 
     override fun filter(player: Player): Boolean {
-        val groupId = group.groupId(player) ?: GroupId(player.uniqueId)
+        val groupId = group.snapshotGroupId(player) ?: GroupId(player.uniqueId)
+        val previous = memberships.put(player.uniqueId, groupId)
+        if (previous != groupId) {
+            try {
+                detachViewer(player)
+            } finally {
+                previous?.let(::releaseEmptyGroup)
+            }
+        }
+        ensureGroup(groupId)
+        if (player in this && !entities.containsKey(player.uniqueId)) attachViewer(player, groupId)
         val npcLocation = activityManagers[groupId]?.position ?: return false
         val distance = npcLocation.distanceSquared(player.location) ?: return false
         val showRange = showRange.get(player)
@@ -41,31 +56,42 @@ class GroupAudienceEntityDisplay(
     }
 
     override fun onPlayerAdd(player: Player) {
-        val groupId = group.groupId(player) ?: GroupId(player.uniqueId)
+        val groupId = group.snapshotGroupId(player) ?: GroupId(player.uniqueId)
+        memberships[player.uniqueId] = groupId
+        ensureGroup(groupId)
+
+        super.onPlayerAdd(player)
+    }
+
+    private fun ensureGroup(groupId: GroupId) {
         activityManagers.computeIfAbsent(groupId) {
             val viewers = groupViewers(groupId)
             val context = SharedActivityContext(instanceEntryRef, viewers)
             val activity = activityCreators.create(context, spawnPosition.toProperty())
             val activityManager = ActivityManager(activity)
             activityManager.initialize(context)
+            lastStates[groupId] = EntityState()
             activityManager
         }
-
-        super.onPlayerAdd(player)
     }
 
     override fun onPlayerFilterAdded(player: Player) {
         super.onPlayerFilterAdded(player)
-        val groupId = group.groupId(player) ?: GroupId(player.uniqueId)
+        val groupId = memberships[player.uniqueId] ?: return
+        attachViewer(player, groupId)
+    }
+
+    private fun attachViewer(player: Player, groupId: GroupId) {
         val activityManager = activityManagers[groupId] ?: return
         entities.computeIfAbsent(player.uniqueId) {
             DisplayEntity(player, creator, activityManager, suppliers.toCollectors())
         }
+        displayedMemberships[player.uniqueId] = DisplayMembership(groupId, activityManager)
         activityManager.addedViewer(SharedActivityContext(instanceEntryRef, groupViewers(groupId)), player)
     }
 
     override fun tick() {
-        consideredPlayers.forEach { it.refresh() }
+        forEachConsideredPlayer { it.refresh() }
 
         activityManagers.forEach { (groupId, manager) ->
             val viewers = groupViewers(groupId)
@@ -87,20 +113,41 @@ class GroupAudienceEntityDisplay(
     }
 
     override fun onPlayerFilterRemoved(player: Player) {
-        val groupId = group.groupId(player) ?: GroupId(player.uniqueId)
-        activityManagers[groupId]?.removedViewer(SharedActivityContext(instanceEntryRef, groupViewers(groupId)), player)
-
+        detachViewer(player)
         super.onPlayerFilterRemoved(player)
-        entities.remove(player.uniqueId)?.dispose()
+    }
+
+    private fun detachViewer(player: Player) {
+        val membership = displayedMemberships.remove(player.uniqueId)
+        try {
+            membership?.manager?.removedViewer(
+                SharedActivityContext(instanceEntryRef, groupViewers(membership.groupId)), player,
+            )
+        } finally {
+            entities.remove(player.uniqueId)?.dispose()
+        }
     }
 
     override fun onPlayerRemove(player: Player) {
-        super.onPlayerRemove(player)
-        val groupId = group.groupId(player) ?: GroupId(player.uniqueId)
-        // When there is nobody that can view an entity, we no longer need to track its activity
-        if (consideredPlayers.none { groupId == group.groupId(it) }) {
-            activityManagers.remove(groupId)?.dispose(SharedActivityContext(instanceEntryRef, emptyList()))
-            lastStates.remove(groupId)
+        try {
+            super.onPlayerRemove(player)
+        } finally {
+            memberships.remove(player.uniqueId)?.let(::releaseEmptyGroup)
+        }
+    }
+
+    private fun releaseEmptyGroup(groupId: GroupId) {
+        var retired: ActivityManager<in SharedActivityContext>? = null
+        activityManagers.computeIfPresent(groupId) { _, manager ->
+            if (memberships.containsValue(groupId)) manager
+            else {
+                retired = manager
+                lastStates.remove(groupId)
+                null
+            }
+        }
+        retired?.let {
+            it.dispose(SharedActivityContext(instanceEntryRef, emptyList()))
         }
     }
 
@@ -113,6 +160,8 @@ class GroupAudienceEntityDisplay(
         }
         activityManagers.clear()
         lastStates.clear()
+        memberships.clear()
+        displayedMemberships.clear()
     }
 
     override fun playerSeesEntity(playerId: UUID, entityId: Int): Boolean {
@@ -120,15 +169,13 @@ class GroupAudienceEntityDisplay(
     }
 
     override fun position(playerId: UUID): Position? {
-        val player = server.getPlayer(playerId) ?: return null
-        val groupId = group.groupId(player) ?: GroupId(player.uniqueId)
+        val groupId = memberships[playerId] ?: return null
         return activityManagers[groupId]?.position?.toPosition()
     }
 
     override fun entityState(playerId: UUID): EntityState {
         entities[playerId]?.state?.let { return it }
-        val player = server.getPlayer(playerId) ?: return EntityState()
-        val groupId = group.groupId(player) ?: GroupId(player.uniqueId)
+        val groupId = memberships[playerId] ?: return EntityState()
         lastStates[groupId]?.let { return it }
         return EntityState()
     }

@@ -12,7 +12,7 @@ class AsyncTrackedQuestUpdate(
     val from: Ref<QuestEntry>?,
     val to: Ref<QuestEntry>?,
 ) :
-    PlayerEvent(player, true) {
+    PlayerEvent(player, !org.bukkit.Bukkit.isOwnedByCurrentRegion(player)) {
     override fun getHandlers(): HandlerList = HANDLER_LIST
 
     companion object {

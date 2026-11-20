@@ -1,5 +1,7 @@
 package com.typewritermc.basic.entries.bound
 
+import com.typewritermc.engine.paper.utils.entityDispatcher
+
 import com.github.retrooper.packetevents.protocol.entity.type.EntityTypes
 import com.github.retrooper.packetevents.protocol.packettype.PacketType.Play
 import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientInteractEntity
@@ -98,6 +100,8 @@ class LockInteractionBound(
     private var previousPosition: Position = Position.ORIGIN
     private var interceptor: InterceptionBundle? = null
     private var confirmationInput: ConfirmationRegistration? = null
+    @Volatile private var inputState = InteractionBoundState.IGNORING
+    @Volatile private var inputToken: Any? = null
 
     override suspend fun initialize() {
         super.initialize()
@@ -109,6 +113,10 @@ class LockInteractionBound(
 
     private suspend fun setup() {
         require(playerState == null)
+        val token = Any()
+        inputToken = token
+        inputState = player.boundState
+        val playerEntityId = player.entityId
         // Flight is not captured. The bound only tells the client it can fly, so there is none to put back.
         playerState = player.state(LOCATION)
         player.sendFakeFlight()
@@ -117,7 +125,7 @@ class LockInteractionBound(
             player.fakeClearInventory()
         }
 
-        Dispatchers.Sync.switchContext {
+        player.entityDispatcher.switchContext {
             // TODO: Remove this and the release in teardown once the visibility extension is
             // released. Hiding the other players becomes opt in through a visibility rule, because
             // opting out of it here is not possible.
@@ -132,25 +140,30 @@ class LockInteractionBound(
             Play.Client.PLAYER_INPUT { event ->
                 val packet = WrapperPlayClientPlayerInput(event)
                 if (packet.isForward || packet.isBackward || packet.isLeft || packet.isRight) {
-                    when (player.boundState) {
+                    when (inputState) {
                         InteractionBoundState.BLOCKING -> event.isCancelled = true
-                        InteractionBoundState.INTERRUPTING -> player.interruptInteraction()
+                        InteractionBoundState.INTERRUPTING -> foliaScheduler.atEntity(player, {
+                            if (inputToken === token && player.boundState == InteractionBoundState.INTERRUPTING) {
+                                player.interruptInteraction()
+                            }
+                        }, null, 1L)
                         InteractionBoundState.IGNORING -> {}
                     }
                     return@PLAYER_INPUT
                 }
 
                 if (!packet.isJump && !packet.isShift) return@PLAYER_INPUT
-                // A player with a confirmation open has that press picked up by the registered input.
-                if (player.keyOffered != null) return@PLAYER_INPUT
-                DialogueTrigger.NEXT_OR_SKIP_ANIMATION.triggerFor(player, player.interactionContext ?: context())
+                foliaScheduler.atEntity(player, {
+                    if (inputToken !== token || player.keyOffered != null) return@atEntity
+                    DialogueTrigger.NEXT_OR_SKIP_ANIMATION.triggerFor(player, player.interactionContext ?: context())
+                }, null, 1L)
             }
             // We want to fake the player's location on the client because otherwise they will interact with
             // themselves crash kicking themselves off the server.
             Play.Client.INTERACT_ENTITY { event ->
                 val packet = WrapperPlayClientInteractEntity(event)
                 // Don't allow the player to interact with themselves.
-                if (player.entityId != packet.entityId) return@INTERACT_ENTITY
+                if (playerEntityId != packet.entityId) return@INTERACT_ENTITY
                 event.isCancelled = true
             }
 
@@ -185,6 +198,8 @@ class LockInteractionBound(
     }
 
     private suspend fun dispose() {
+        inputToken = null
+        inputState = InteractionBoundState.IGNORING
         confirmationInput?.dispose()
         confirmationInput = null
         interceptor?.cancel()
@@ -194,10 +209,10 @@ class LockInteractionBound(
         if (!player.isFloodgate) {
             player.restoreInventory()
         }
-        Dispatchers.Sync.switchContext {
+        player.entityDispatcher.switchContext {
             // Revealed only after the player is restored, so nobody sees them reappear at the
             // position the bound moved them to.
-            player.restore(playerState)
+            player.restoreAsync(playerState)
             player.sendRealAbilities()
             playerHides.release(this@LockInteractionBound)
             playerState = null
@@ -240,6 +255,7 @@ class LockInteractionBound(
 
     override suspend fun tick() {
         super.tick()
+        inputState = player.boundState
         if (player.boundState == InteractionBoundState.IGNORING) {
             return
         }
@@ -254,6 +270,7 @@ class LockInteractionBound(
         previousBoundState: InteractionBoundState,
         newBoundState: InteractionBoundState
     ) {
+        inputState = newBoundState
         if (newBoundState == InteractionBoundState.IGNORING) {
             dispose()
             return
@@ -276,7 +293,11 @@ class LockInteractionBound(
     }
 
     override suspend fun teardown() {
-        dispose()
+        try {
+            dispose()
+        } finally {
+            super.teardown()
+        }
     }
 }
 
@@ -329,7 +350,7 @@ private class JavaLockInteractionBoundHandler(
         entity.teleport(target.toPacketLocation())
 
         if ((player.position.distanceSquared(to) ?: Double.NEGATIVE_INFINITY) > MAX_PLAYER_DISTANCE_SQUARED) {
-            player.teleportAsync(to.toBukkitLocation()).await()
+            foliaScheduler.teleport(player, to.toBukkitLocation()).await()
         }
     }
 
@@ -338,7 +359,7 @@ private class JavaLockInteractionBoundHandler(
         newEntity.spawn(to.toPacketLocation())
         newEntity.addViewer(player.uniqueId)
 
-        player.teleportAsync(to.toBukkitLocation()).await()
+        foliaScheduler.teleport(player, to.toBukkitLocation()).await()
         player.spectateEntity(newEntity)
 
         entity.despawn()
@@ -366,7 +387,7 @@ private class JavaLockInteractionBoundHandler(
     }
 
     private suspend fun setupEntity(position: Position) {
-        player.teleportAsync(position.toBukkitLocation()).await()
+        foliaScheduler.teleport(player, position.toBukkitLocation()).await()
         entity.spawn(position.withY { it + positionYCorrection }.toPacketLocation())
         entity.addViewer(player.uniqueId)
         player.spectateEntity(entity)
@@ -399,7 +420,7 @@ private class BedrockLockInteractionBoundHandler(
 
     override suspend fun initialize() {
         val position = startPosition.withY { it + positionYCorrection }
-        player.teleportAsync(position.toBukkitLocation()).await()
+        foliaScheduler.teleport(player, position.toBukkitLocation()).await()
         geyserConnection.setupCamera(cameraLockId)
         geyserConnection.forceCameraPosition(position)
     }
@@ -407,13 +428,13 @@ private class BedrockLockInteractionBoundHandler(
     override suspend fun move(from: Position, to: Position, canMove: Boolean) {
         val position = to.withY { it + positionYCorrection }
         if (from.world != to.world) {
-            player.teleportAsync(to.toBukkitLocation()).await()
+            foliaScheduler.teleport(player, to.toBukkitLocation()).await()
             geyserConnection.forceCameraPosition(position)
             return
         }
         geyserConnection.interpolateCameraPosition(position)
         if ((player.position.distanceSquared(to) ?: Double.NEGATIVE_INFINITY) > MAX_PLAYER_DISTANCE_SQUARED) {
-            player.teleportAsync(to.toBukkitLocation()).await()
+            foliaScheduler.teleport(player, to.toBukkitLocation()).await()
         }
     }
 

@@ -1,5 +1,7 @@
 package com.typewritermc.engine.paper.content.modes
 
+import com.typewritermc.engine.paper.utils.entityDispatcher
+
 import com.google.gson.Gson
 import com.typewritermc.core.interaction.context
 import com.typewritermc.core.utils.failure
@@ -249,10 +251,14 @@ abstract class RecordingCinematicContentMode<F : Frame<F>>(
     abstract fun captureFrame(): F
     abstract fun applyState(value: F)
 
+    protected open suspend fun applyStateAsync(value: F) {
+        applyState(value)
+    }
+
     private suspend fun applyStartingState() {
         val value = recorder[frame] ?: return
-        Dispatchers.Sync.switchContext {
-            applyState(value)
+        player.entityDispatcher.switchContext {
+            applyStateAsync(value)
         }
     }
 

@@ -2,6 +2,7 @@ package com.typewritermc.engine.paper.facts
 
 import com.typewritermc.core.entries.Ref
 import com.typewritermc.core.interaction.SessionTracker
+import com.typewritermc.core.interaction.RetirableSessionTracker
 import com.typewritermc.engine.paper.entry.entries.ReadableFactEntry
 import com.typewritermc.engine.paper.interaction.PlayerSessionManager
 import org.bukkit.entity.Player
@@ -15,7 +16,7 @@ data class FactUpdateContext(val player: Player, val ref: Ref<ReadableFactEntry>
 
 class FactTracker(
     private val player: Player,
-) : SessionTracker {
+) : SessionTracker, RetirableSessionTracker {
     private val factCache = ConcurrentHashMap<Ref<ReadableFactEntry>, Int>()
     private val listeners = ConcurrentHashMap<UUID, FactListener>()
 
@@ -26,7 +27,9 @@ class FactTracker(
         refresh()
     }
 
-    override fun teardown() {
+    override fun teardown() = retire()
+
+    override fun retire() {
         listeners.clear()
         factCache.clear()
     }

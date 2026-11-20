@@ -1,5 +1,7 @@
 package com.typewritermc.basic.entries.action
 
+import com.typewritermc.engine.paper.utils.entityDispatcher
+
 import com.typewritermc.core.books.pages.Colors
 import com.typewritermc.core.entries.Ref
 import com.typewritermc.core.extension.annotations.Entry
@@ -37,7 +39,7 @@ class DelayedActionEntry(
 ) : ActionEntry {
     override fun ActionTrigger.execute() {
         disableAutomaticTriggering()
-        Dispatchers.UntickedAsync.launch {
+        player.entityDispatcher.launch {
             delay(duration.get(player, context).toMillis())
             triggerManually()
         }

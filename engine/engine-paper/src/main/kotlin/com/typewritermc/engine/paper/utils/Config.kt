@@ -17,15 +17,7 @@ class ConfigPropertyDelegate<T : Any>(
     private val comments: String?,
 ) {
     operator fun getValue(thisRef: Nothing?, property: KProperty<*>): T {
-        val value = plugin.config.get(key)
-        if (value == null) {
-            plugin.config.set(key, default)
-            if (comments != null) {
-                plugin.config.setComments(key, comments.lines())
-            }
-            plugin.saveConfig()
-            return default
-        }
+        val value = plugin.configurationFile.getOrDefault(key, default, comments)
         val t = klass.safeCast(value)
         if (t == null) {
             logger.warning("Invalid value for config key '$key', expected ${klass.simpleName}, got ${value::class.simpleName}")
@@ -45,7 +37,7 @@ class OptionalConfigPropertyDelegate<T : Any>(
     private val klass: KClass<T>,
 ) {
     operator fun getValue(thisRef: Nothing?, property: KProperty<*>): T? {
-        val value = plugin.config.get(key) ?: return null
+        val value = plugin.configurationFile.get(key) ?: return null
         val t = klass.safeCast(value)
         if (t == null) {
             logger.warning("Invalid value for config key '$key', expected ${klass.simpleName}, got ${value::class.simpleName}")

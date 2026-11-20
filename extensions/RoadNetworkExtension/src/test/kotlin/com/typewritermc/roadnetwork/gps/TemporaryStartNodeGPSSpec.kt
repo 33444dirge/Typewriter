@@ -22,13 +22,19 @@ import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.ints.shouldBeGreaterThan
 import io.kotest.matchers.shouldBe
 import io.mockk.coEvery
+import io.mockk.every
+import io.mockk.mockkStatic
+import io.mockk.unmockkStatic
+import io.mockk.mockkObject
+import io.mockk.unmockkObject
+import com.typewritermc.engine.paper.utils.BlockSnapshots
+import org.bukkit.Bukkit
+import java.util.UUID
 import io.mockk.mockk
 import org.koin.core.context.startKoin
 import org.koin.core.context.stopKoin
 import org.koin.core.qualifier.named
 import org.koin.dsl.module
-import org.mockbukkit.mockbukkit.MockBukkit
-import org.mockbukkit.mockbukkit.ServerMock
 import java.util.Optional
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.function.Consumer
@@ -107,7 +113,6 @@ private const val NODE_COUNT = 9
 private const val NODE_SPACING = 25.0
 
 class TemporaryStartNodeGPSSpec : FunSpec() {
-    private lateinit var server: ServerMock
     private lateinit var world: World
     private lateinit var network: RoadNetwork
     private val blockPathfinderCalls = AtomicInteger()
@@ -117,8 +122,18 @@ class TemporaryStartNodeGPSSpec : FunSpec() {
     init {
         beforeTest {
             blockPathfinderCalls.set(0)
-            server = MockBukkit.mock()
-            world = World(server.addSimpleWorld("gps-temporary-node-world").uid.toString())
+            val worldId = UUID.randomUUID()
+            val bukkitWorld = mockk<org.bukkit.World>()
+            val server = mockk<org.bukkit.Server>()
+            world = World(worldId.toString())
+            mockkStatic(Bukkit::class)
+            every { Bukkit.getServer() } returns server
+            every { server.getWorld(worldId) } returns bukkitWorld
+            mockkObject(BlockSnapshots.Companion)
+            val snapshots = mockk<BlockSnapshots>()
+            every { snapshots.worldId } returns worldId.toString()
+            every { snapshots.hasMissing } returns false
+            coEvery { BlockSnapshots.create(any(), any()) } returns snapshots
 
             // A straight road running from x = 0 to x = 200. The spacing is close enough that a start
             // between the first two nodes reaches both, and the destination is far enough that the
@@ -152,7 +167,8 @@ class TemporaryStartNodeGPSSpec : FunSpec() {
 
         afterTest {
             stopKoin()
-            MockBukkit.unmock()
+            unmockkStatic(Bukkit::class)
+            unmockkObject(BlockSnapshots.Companion)
         }
 
         test("a start between two nodes builds a temporary node and heads forward") {

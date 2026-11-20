@@ -7,7 +7,6 @@ import com.github.retrooper.packetevents.event.PacketSendEvent
 import com.github.retrooper.packetevents.protocol.packettype.PacketType.Play
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerActionBar
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerSystemChatMessage
-import com.github.shynixn.mccoroutine.bukkit.registerSuspendingEvents
 import com.typewritermc.engine.paper.plugin
 import com.typewritermc.engine.paper.utils.server
 import net.kyori.adventure.text.Component
@@ -24,14 +23,16 @@ class ActionBarBlockerHandler :
     PacketListenerAbstract(PacketListenerPriority.LOW), Listener {
     fun initialize() {
         PacketEvents.getAPI().eventManager.registerListener(this)
-        server.pluginManager.registerSuspendingEvents(this, plugin)
+        server.pluginManager.registerEvents(this, plugin)
     }
 
-    private val blockers = mutableMapOf<UUID, ActionBarBlocker>()
+    private val blockers = java.util.concurrent.ConcurrentHashMap<UUID, ActionBarBlocker>()
 
     override fun onPacketSend(event: PacketSendEvent?) {
         if (event == null) return
-        val blocker = blockers[event.user.uuid] ?: return
+        if (event.packetType != Play.Server.SYSTEM_CHAT_MESSAGE && event.packetType != Play.Server.ACTION_BAR) return
+        val playerId = event.user.uuid ?: return
+        val blocker = blockers[playerId] ?: return
 
         val component = when (event.packetType) {
             Play.Server.SYSTEM_CHAT_MESSAGE -> {
@@ -58,7 +59,7 @@ class ActionBarBlockerHandler :
     }
 
     fun enable(player: Player) {
-        if (player.uniqueId in blockers) return
+        if (blockers.containsKey(player.uniqueId)) return
         blockers[player.uniqueId] = ActionBarBlocker()
     }
 
@@ -73,6 +74,8 @@ class ActionBarBlockerHandler :
 
     fun shutdown() {
         PacketEvents.getAPI().eventManager.unregisterListener(this)
+        org.bukkit.event.HandlerList.unregisterAll(this)
+        blockers.clear()
     }
 }
 

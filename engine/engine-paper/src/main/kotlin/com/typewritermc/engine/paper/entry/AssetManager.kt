@@ -2,6 +2,8 @@ package com.typewritermc.engine.paper.entry
 
 import com.typewritermc.engine.paper.entry.entries.AssetEntry
 import com.typewritermc.engine.paper.plugin
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
 
@@ -74,50 +76,50 @@ class LocalAssetStorage : AssetStorage {
     )
     override suspend fun storeAsset(path: String, content: String) = storeStringAsset(path, content)
 
-    override suspend fun storeStringAsset(path: String, content: String) {
+    override suspend fun storeStringAsset(path: String, content: String): Unit = withContext(Dispatchers.IO) {
         val file = plugin.dataFolder.resolve("assets/$path")
         file.parentFile.mkdirs()
         file.writeText(content)
     }
 
-    override suspend fun storeBinaryAsset(path: String, content: ByteArray) {
+    override suspend fun storeBinaryAsset(path: String, content: ByteArray): Unit = withContext(Dispatchers.IO) {
         val file = plugin.dataFolder.resolve("assets/$path")
         file.parentFile.mkdirs()
         file.writeBytes(content)
     }
 
-    override suspend fun containsAsset(path: String): Boolean {
-        return plugin.dataFolder.resolve("assets/$path").exists()
+    override suspend fun containsAsset(path: String): Boolean = withContext(Dispatchers.IO) {
+        plugin.dataFolder.resolve("assets/$path").exists()
     }
 
     @Deprecated("Use fetchStringAsset instead.", replaceWith = ReplaceWith("fetchStringAsset(path)"))
     override suspend fun fetchAsset(path: String): Result<String> = fetchStringAsset(path)
 
-    override suspend fun fetchStringAsset(path: String): Result<String> {
+    override suspend fun fetchStringAsset(path: String): Result<String> = withContext(Dispatchers.IO) {
         val file = plugin.dataFolder.resolve("assets/$path")
         if (!file.exists()) {
-            return Result.failure(IllegalArgumentException("Asset $path not found."))
+            return@withContext Result.failure(IllegalArgumentException("Asset $path not found."))
         }
-        return Result.success(file.readText())
+        Result.success(file.readText())
     }
 
-    override suspend fun fetchBinaryAsset(path: String): Result<ByteArray> {
+    override suspend fun fetchBinaryAsset(path: String): Result<ByteArray> = withContext(Dispatchers.IO) {
         val file = plugin.dataFolder.resolve("assets/$path")
         if (!file.exists()) {
-            return Result.failure(IllegalArgumentException("Asset $path not found."))
+            return@withContext Result.failure(IllegalArgumentException("Asset $path not found."))
         }
-        return Result.success(file.readBytes())
+        Result.success(file.readBytes())
     }
 
-    override suspend fun deleteAsset(path: String) {
+    override suspend fun deleteAsset(path: String): Unit = withContext(Dispatchers.IO) {
         val asset = plugin.dataFolder.resolve("assets/$path")
         val deletedAsset = plugin.dataFolder.resolve("deleted_assets/$path")
         deletedAsset.parentFile.mkdirs()
-        asset.renameTo(deletedAsset)
+        check(asset.renameTo(deletedAsset)) { "Failed to move asset $path to deleted_assets" }
     }
 
-    override suspend fun fetchAllAssetPaths(): Set<String> {
-        return plugin.dataFolder.resolve("assets").walk().filter { it.isFile }
+    override suspend fun fetchAllAssetPaths(): Set<String> = withContext(Dispatchers.IO) {
+        plugin.dataFolder.resolve("assets").walk().filter { it.isFile }
             .map { it.relativeTo(plugin.dataFolder.resolve("assets")).path }.toSet()
     }
 }

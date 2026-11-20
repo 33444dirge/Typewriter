@@ -73,7 +73,20 @@ subprojects {
         // has nothing handing them over, so it asks for them itself. These versions follow the ones the
         // engine builds against.
         testImplementation("com.typewritermc:engine-paper:$typewriterEngineVersion")
-        testImplementation("io.papermc.paper:paper-api:1.21.11-R0.1-SNAPSHOT")
+        testImplementation(files("../../compile-libs/shiroha-api-26.2-SNAPSHOT.jar"))
+        testImplementation(platform("net.kyori:adventure-bom:5.2.0"))
+        testImplementation("net.kyori:adventure-api")
+        testImplementation("net.kyori:adventure-text-minimessage")
+        testImplementation("net.kyori:adventure-text-serializer-plain")
+        testImplementation("net.kyori:adventure-text-serializer-legacy")
+        testImplementation("net.kyori:adventure-text-serializer-gson")
+        testImplementation("net.kyori:adventure-text-logger-slf4j")
+        testImplementation("org.apache.logging.log4j:log4j-api:2.26.0")
+        testImplementation(files("../../compile-libs/bungeecord-chat.jar", "../../compile-libs/brigadier-1.3.10.jar"))
+        testImplementation("org.joml:joml:1.10.8")
+        testImplementation("com.google.guava:guava:33.6.0-jre")
+        testImplementation("org.yaml:snakeyaml:2.6")
+        testImplementation("it.unimi.dsi:fastutil:8.5.18")
         testImplementation("com.github.retrooper:packetevents-spigot:2.13.0")
         testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
 

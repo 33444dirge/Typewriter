@@ -11,6 +11,7 @@ import com.typewritermc.core.interaction.context
 import com.typewritermc.engine.paper.entry.TriggerableEntry
 import com.typewritermc.engine.paper.entry.entries.EventEntry
 import com.typewritermc.engine.paper.entry.startDialogueWithOrNextDialogue
+import com.typewritermc.engine.paper.utils.foliaScheduler
 import io.lumine.mythic.bukkit.events.MythicMobInteractEvent
 
 @Entry("mythicmobs_interact_event", "MythicMob Interact Event", Colors.YELLOW, "fa6-solid:dragon")
@@ -32,7 +33,10 @@ class MythicMobInteractEventEntry(
 
 @EntryListener(MythicMobInteractEventEntry::class)
 fun onMythicMobInteractEvent(event: MythicMobInteractEvent, query: Query<MythicMobInteractEventEntry>) {
-    query.findWhere {
-        it.mobName.toRegex(RegexOption.IGNORE_CASE).matches(event.activeMobType.internalName)
-    }.startDialogueWithOrNextDialogue(event.player, context())
+    val player = event.player
+    val type = event.activeMob.mobType
+    val entries = query.findWhere {
+        it.mobName.toRegex(RegexOption.IGNORE_CASE).matches(type)
+    }.toList()
+    foliaScheduler.atEntity(player, { entries.startDialogueWithOrNextDialogue(player, context()) }, null, 1L)
 }

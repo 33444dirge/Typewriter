@@ -13,9 +13,9 @@ import com.typewritermc.engine.paper.entry.entries.ActionTrigger
 import com.typewritermc.engine.paper.entry.entries.ConstVar
 import com.typewritermc.engine.paper.entry.entries.Var
 import com.typewritermc.engine.paper.extensions.placeholderapi.parsePlaceholders
-import com.typewritermc.engine.paper.utils.Sync
+import com.typewritermc.engine.paper.utils.entityDispatcher
+import com.typewritermc.mythicmobs.removeOnOwner
 import io.lumine.mythic.bukkit.MythicBukkit
-import kotlinx.coroutines.Dispatchers
 
 
 @Entry("despawn_mythicmobs_mob", "Despawn a mob from MythicMobs", Colors.ORANGE, "fluent:crown-subtract-24-filled")
@@ -36,16 +36,12 @@ class DespawnMobActionEntry(
     private val mobName: Var<String> = ConstVar(""),
 ) : ActionEntry {
     override fun ActionTrigger.execute() {
-        val mob = MythicBukkit.inst().mobManager.getMythicMob(mobName.get(player, context).parsePlaceholders(player))
-        if (!mob.isPresent) return
-
-        Dispatchers.Sync.launch {
-            MythicBukkit.inst().mobManager.activeMobs.removeIf {
-                if (it.type == mob.get()) {
-                    it.entity.remove()
-                    return@removeIf true
-                }
-                false
+        player.entityDispatcher.launch {
+            val manager = MythicBukkit.inst().mobManager
+            val type = manager.getMythicMob(mobName.get(player, context).parsePlaceholders(player))
+                .orElse(null)?.internalName ?: return@launch
+            manager.activeMobs.filter { it.mobType == type }.forEach { mob ->
+                mob.removeOnOwner()
             }
         }
     }

@@ -25,7 +25,9 @@ abstract class SingleFilter<E : AudienceFilterEntry, D : PlayerSingleDisplay<E>>
 
     override fun filter(player: Player): Boolean = displays[player.uniqueId]?.ref == ref
     override fun tick() {
-        displays.values.forEach { it.tick() }
+        forEachConsideredPlayer { player ->
+            displays[player.uniqueId]?.takeIf { it.ref == ref }?.tick()
+        }
     }
 
     override fun onPlayerAdd(player: Player) {

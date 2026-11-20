@@ -25,7 +25,8 @@ import java.io.File
 import java.lang.reflect.Type
 import java.text.SimpleDateFormat
 import java.util.*
-import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 import kotlin.time.Duration.Companion.seconds
 
 interface StagingManager {
@@ -53,9 +54,10 @@ interface StagingManager {
 class StagingManagerImpl : StagingManager, KoinComponent {
     private val gson: Gson by inject(named("bukkitDataParser"))
 
-    private var _pages: ConcurrentHashMap<String, JsonObject>? = null
+    private val documents = StagedPages()
+    private val ioLock = ReentrantLock()
     override val pages: Map<String, JsonObject>
-        get() = _pages ?: emptyMap()
+        get() = documents.snapshot()
 
     private val autoSaver =
         Timeout(
@@ -63,7 +65,7 @@ class StagingManagerImpl : StagingManager, KoinComponent {
             ::saveStaging,
             immediateRunnable = {
                 // When called to save, we immediately want to update the staging state
-                if (stagingState != PUBLISHING) stagingState = STAGING
+                if (!documents.publishing) stagingState = STAGING
             })
 
     private val stagingDir
@@ -72,7 +74,7 @@ class StagingManagerImpl : StagingManager, KoinComponent {
     private val publishedDir
         get() = plugin.dataFolder["pages"]
 
-    override var stagingState = PUBLISHED
+    @Volatile override var stagingState = PUBLISHED
         private set(value) {
             field = value
             StagingChangeEvent(value).callEvent()
@@ -83,7 +85,7 @@ class StagingManagerImpl : StagingManager, KoinComponent {
 
         // Read the pages from the file
         val dir = if (stagingState == STAGING) stagingDir else publishedDir
-        _pages = ConcurrentHashMap(fetchPages(dir))
+        documents.load(ioLock.withLock { fetchPages(dir) })
     }
 
     private fun fetchPages(dir: File): Map<String, JsonObject> {
@@ -103,71 +105,65 @@ class StagingManagerImpl : StagingManager, KoinComponent {
         autoSaver.force()
     }
 
-    override fun createPage(data: JsonObject): Result<String> {
-        if (!data.has("id")) return failure("Id is required")
-        if (!data.has("name")) return failure("Name is required")
+    override fun createPage(data: JsonObject): Result<String> = edit { pages ->
+        if (!data.has("id")) return@edit failure("Id is required")
+        if (!data.has("name")) return@edit failure("Name is required")
         val idJson = data["id"]
-        if (!idJson.isJsonPrimitive || !idJson.asJsonPrimitive.isString) return failure("Id must be a string")
+        if (!idJson.isJsonPrimitive || !idJson.asJsonPrimitive.isString) return@edit failure("Id must be a string")
         val id = idJson.asString
 
-        if (pages.containsKey(id)) return failure("Page with that id already exists")
+        if (pages.containsKey(id)) return@edit failure("Page with that id already exists")
 
         // Add the version of this page to track migrations
         data.addProperty("version", plugin.pluginMeta.version)
 
-        _pages?.put(id, data)
-        autoSaver()
-        return ok("Successfully created page with name $id")
+        pages[id] = data.deepCopy()
+        return@edit ok("Successfully created page with name $id")
     }
 
-    override fun renamePage(pageId: String, newName: String): Result<String> {
-        val page = getPage(pageId) onFail { return it }
+    override fun renamePage(pageId: String, newName: String): Result<String> = edit { pages ->
+        val page = getPage(pages, pageId) onFail { return@edit it }
 
         page.addProperty("name", newName)
 
-        autoSaver()
-        return ok("Successfully renamed page from $pageId to $newName")
+        return@edit ok("Successfully renamed page from $pageId to $newName")
     }
 
-    override fun changePageValue(pageId: String, path: String, value: JsonElement): Result<String> {
-        val page = getPage(pageId) onFail { return it }
+    override fun changePageValue(pageId: String, path: String, value: JsonElement): Result<String> = edit { pages ->
+        val page = getPage(pages, pageId) onFail { return@edit it }
 
-        page.changePathValue(path, value)
+        page.changePathValue(path, value.deepCopy())
 
-        autoSaver()
-        return ok("Successfully updated field")
+        return@edit ok("Successfully updated field")
     }
 
-    override fun deletePage(pageId: String): Result<String> {
-        _pages?.remove(pageId) ?: return failure("Page does not exist")
+    override fun deletePage(pageId: String): Result<String> = edit { pages ->
+        pages.remove(pageId) ?: return@edit failure("Page does not exist")
 
-        autoSaver()
-        return ok("Successfully deleted page with name $pageId")
+        return@edit ok("Successfully deleted page with name $pageId")
     }
 
-    override fun moveEntry(entryId: String, fromPageId: String, toPageId: String): Result<String> {
-        val from = pages[fromPageId] ?: return failure("Page '$fromPageId' does not exist")
-        val to = pages[toPageId] ?: return failure("Page '$toPageId' does not exist")
+    override fun moveEntry(entryId: String, fromPageId: String, toPageId: String): Result<String> = edit { pages ->
+        val from = pages[fromPageId] ?: return@edit failure("Page '$fromPageId' does not exist")
+        val to = pages[toPageId] ?: return@edit failure("Page '$toPageId' does not exist")
 
         val entry = from["entries"].asJsonArray.find { it.asJsonObject["id"].asString == entryId }
-            ?: return failure("Entry does not exist in page '$fromPageId'")
+            ?: return@edit failure("Entry does not exist in page '$fromPageId'")
 
         from["entries"].asJsonArray.remove(entry)
         to["entries"].asJsonArray.add(entry)
 
-        autoSaver()
-        return ok("Successfully moved entry")
+        return@edit ok("Successfully moved entry")
     }
 
-    override fun createEntry(pageId: String, data: JsonObject): Result<String> {
-        val page = getPage(pageId) onFail { return it }
+    override fun createEntry(pageId: String, data: JsonObject): Result<String> = edit { pages ->
+        val page = getPage(pages, pageId) onFail { return@edit it }
         val entries = page["entries"] as? JsonArray ?: JsonArray()
 
-        entries.add(data)
+        entries.add(data.deepCopy())
         page.add("entries", entries)
 
-        autoSaver()
-        return ok("Successfully created entry with id ${data["id"]}")
+        return@edit ok("Successfully created entry with id ${data["id"]}")
     }
 
     override fun updateEntryField(
@@ -175,39 +171,37 @@ class StagingManagerImpl : StagingManager, KoinComponent {
         entryId: String,
         path: String,
         value: JsonElement
-    ): Result<String> {
+    ): Result<String> = edit { pages ->
         // Update the page
-        val page = getPage(pageId) onFail { return it }
+        val page = getPage(pages, pageId) onFail { return@edit it }
         val entries = page["entries"].asJsonArray
-        val entry = entries.find { it.asJsonObject["id"].asString == entryId } ?: return failure("Entry does not exist")
+        val entry = entries.find { it.asJsonObject["id"].asString == entryId } ?: return@edit failure("Entry does not exist")
 
         // Update the entry
         entry.createPath(path)
-        entry.changePathValue(path, value)
+        entry.changePathValue(path, value.deepCopy())
 
-        autoSaver()
-        return ok("Successfully updated field")
+        return@edit ok("Successfully updated field")
     }
 
-    override fun updateEntry(pageId: String, data: JsonObject): Result<String> {
-        val page = getPage(pageId) onFail { return it }
-        val entries = page["entries"] as? JsonArray ?: return failure("Page does not have any entries")
-        val entryId = data["id"]?.asString ?: return failure("Entry does not have an id")
+    override fun updateEntry(pageId: String, data: JsonObject): Result<String> = edit { pages ->
+        val page = getPage(pages, pageId) onFail { return@edit it }
+        val entries = page["entries"] as? JsonArray ?: return@edit failure("Page does not have any entries")
+        val entryId = data["id"]?.asString ?: return@edit failure("Entry does not have an id")
 
         entries.removeAll { entry -> entry.asJsonObject["id"]?.asString == entryId }
-        entries.add(data)
+        entries.add(data.deepCopy())
 
-        autoSaver()
-        return ok("Successfully updated entry with id ${data["id"]}")
+        return@edit ok("Successfully updated entry with id ${data["id"]}")
     }
 
-    override fun reorderEntry(pageId: String, entryId: String, newIndex: Int): Result<String> {
-        val page = getPage(pageId) onFail { return it }
+    override fun reorderEntry(pageId: String, entryId: String, newIndex: Int): Result<String> = edit { pages ->
+        val page = getPage(pages, pageId) onFail { return@edit it }
         val entries = page["entries"].asJsonArray
         val oldIndex = entries.indexOfFirst { it.asJsonObject["id"].asString == entryId }
 
-        if (oldIndex == -1) return failure("Entry does not exist")
-        if (oldIndex == newIndex) return ok("Entry is already at the correct index")
+        if (oldIndex == -1) return@edit failure("Entry does not exist")
+        if (oldIndex == newIndex) return@edit ok("Entry is already at the correct index")
 
         val correctIndex = if (oldIndex < newIndex) newIndex - 1 else newIndex
 
@@ -215,19 +209,17 @@ class StagingManagerImpl : StagingManager, KoinComponent {
         entries[correctIndex] = entries[oldIndex]
         entries[oldIndex] = entryAtNewIndex
 
-        autoSaver()
-        return ok("Successfully reordered entry")
+        return@edit ok("Successfully reordered entry")
     }
 
-    override fun deleteEntry(pageId: String, entryId: String): Result<String> {
-        val page = getPage(pageId) onFail { return it }
+    override fun deleteEntry(pageId: String, entryId: String): Result<String> = edit { pages ->
+        val page = getPage(pages, pageId) onFail { return@edit it }
         val entries = page["entries"].asJsonArray
-        val entry = entries.find { it.asJsonObject["id"].asString == entryId } ?: return failure("Entry does not exist")
+        val entry = entries.find { it.asJsonObject["id"].asString == entryId } ?: return@edit failure("Entry does not exist")
 
         entries.remove(entry)
 
-        autoSaver()
-        return ok("Successfully deleted entry with id $entryId")
+        return@edit ok("Successfully deleted entry with id $entryId")
     }
 
     override fun findEntryPage(entryId: String): Result<String> {
@@ -238,20 +230,24 @@ class StagingManagerImpl : StagingManager, KoinComponent {
         return ok(page["name"].asString)
     }
 
-    private fun getPage(id: String): Result<JsonObject> {
+    private fun getPage(pages: Map<String, JsonObject>, id: String): Result<JsonObject> {
         val page = pages[id] ?: return failure("Page '$id' does not exist")
         return ok(page)
     }
 
-    private fun saveStaging() {
-        // If we are already publishing, we don't want to save the staging
-        if (stagingState == PUBLISHING) return
-        // Data is not loaded yet, so we can't save it
-        val pages = this._pages ?: return
-        val dir = stagingDir
+    private fun edit(action: (MutableMap<String, JsonObject>) -> Result<String>): Result<String> {
+        val result = documents.edit(action)
+        if (result.isSuccess) autoSaver()
+        return result
+    }
 
-        // If there are no pages, there is nothing to save.
-        if (pages.isEmpty()) return
+    private fun saveStaging() = ioLock.withLock {
+        // If we are already publishing, we don't want to save the staging
+        if (documents.publishing) return@withLock
+        // Data is not loaded yet, so we can't save it
+        val pages = documents.snapshotOrNull() ?: return@withLock
+        val dir = stagingDir
+        dir.mkdirs()
 
         pages.forEach { (id, page) ->
             val file = dir["$id.json"]
@@ -270,48 +266,43 @@ class StagingManagerImpl : StagingManager, KoinComponent {
     // Save the page to the file
     override suspend fun publish(): Result<String> {
         if (stagingState != STAGING) return failure("Can only publish when in staging")
-        if (this._pages == null) return failure("Pages are not loaded yet")
+        val pages = documents.beginPublish() ?: return failure("Pages are not loaded or already publishing")
         stagingState = PUBLISHING
         autoSaver.cancel()
-        return Dispatchers.UntickedAsync.switchContext {
-            if (!publishedDir.exists()) publishedDir.mkdirs()
-
-            try {
-                pages.forEach { (name, page) ->
-                    val file = publishedDir["$name.json"]
-                    file.createNewFile()
-                    file.writeText(page.toString())
+        return try {
+            Dispatchers.IO.switchContext {
+                try {
+                    ioLock.withLock {
+                        publishedDir.mkdirs()
+                        pages.forEach { (name, page) ->
+                            publishedDir["$name.json"].writeText(page.toString())
+                        }
+                        val deletedPages = publishedDir.listFiles().orEmpty()
+                            .filter { it.nameWithoutExtension !in pages.keys }
+                        if (deletedPages.isNotEmpty()) {
+                            logger.info("Deleting ${deletedPages.size} pages, as they are no longer in staging. " +
+                                "(${deletedPages.joinToString(", ") { it.nameWithoutExtension }})")
+                            deletedPages.backupAndMove()
+                        }
+                        stagingDir.deleteRecursively()
+                    }
+                    plugin.reload()
+                    stagingState = PUBLISHED
+                    ok("Successfully published the staging state")
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    stagingState = STAGING
+                    failure("Failed to publish the staging state")
                 }
-
-                val stagingPages = pages.keys
-                val publishedFiles = publishedDir.listFiles()?.toList() ?: emptyList()
-
-                val deletedPages = publishedFiles.filter { it.nameWithoutExtension !in stagingPages }
-                if (deletedPages.isNotEmpty()) {
-                    logger.info(
-                        "Deleting ${deletedPages.size} pages, as they are no longer in staging. (${
-                            deletedPages.joinToString(
-                                ", "
-                            ) { it.nameWithoutExtension }
-                        })"
-                    )
-                    deletedPages.backupAndMove()
-                }
-
-                // Delete the staging folder
-                stagingDir.deleteRecursively()
-                plugin.reload()
-                stagingState = PUBLISHED
-                ok("Successfully published the staging state")
-            } catch (e: Exception) {
-                e.printStackTrace()
-                stagingState = STAGING
-                failure("Failed to publish the staging state")
             }
+        } finally {
+            documents.endPublish()
+            if (stagingState == PUBLISHING) stagingState = STAGING
         }
     }
 
     override fun shutdown() {
+        autoSaver.cancel()
         if (stagingState == STAGING) saveStaging()
     }
 }

@@ -14,7 +14,9 @@ import com.typewritermc.engine.paper.entry.entries.ActionEntry
 import com.typewritermc.engine.paper.entry.entries.ActionTrigger
 import com.typewritermc.engine.paper.entry.entries.ConstVar
 import com.typewritermc.engine.paper.entry.entries.Var
-import com.typewritermc.engine.paper.utils.Sync
+import com.typewritermc.engine.paper.utils.entityDispatcher
+import com.typewritermc.engine.paper.utils.regionDispatcher
+import com.typewritermc.core.utils.switchContext
 import com.typewritermc.engine.paper.utils.toBukkitLocation
 import kotlinx.coroutines.Dispatchers
 import org.bukkit.Material
@@ -43,9 +45,12 @@ class SetBlockActionEntry(
     val location: Var<Position> = ConstVar(Position.ORIGIN),
 ) : ActionEntry {
     override fun ActionTrigger.execute() {
-        Dispatchers.Sync.launch {
+        player.entityDispatcher.launch {
             val bukkitLocation = location.get(player, context).toBukkitLocation()
-            bukkitLocation.block.type = material.get(player, context)
+            val targetMaterial = material.get(player, context)
+            bukkitLocation.regionDispatcher.switchContext {
+                bukkitLocation.block.type = targetMaterial
+            }
         }
     }
 }

@@ -1,5 +1,7 @@
 package com.typewritermc.basic.entries.action
 
+import com.typewritermc.engine.paper.utils.entityDispatcher
+
 import com.github.retrooper.packetevents.protocol.entity.type.EntityTypes
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerEntityStatus
 import com.typewritermc.core.books.pages.Colors
@@ -76,7 +78,7 @@ class FireworkActionEntry(
             entity.despawn()
             return
         }
-        Dispatchers.UntickedAsync.launch {
+        player.entityDispatcher.launch {
             delay(flightDuration.toMillis())
             WrapperPlayServerEntityStatus(entityId, FIREWORK_EXPLOSION_STATUS) sendPacketTo player
             entity.despawn()

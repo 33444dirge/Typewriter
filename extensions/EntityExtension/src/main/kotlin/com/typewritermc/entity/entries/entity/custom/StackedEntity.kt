@@ -86,4 +86,9 @@ class StackedEntity(
     override fun dispose() {
         entities.forEach { it.dispose() }
     }
+
+    override fun retireResources() {
+        entities.forEach { it.retireResources() }
+        super.retireResources()
+    }
 }

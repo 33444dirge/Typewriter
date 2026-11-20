@@ -1,10 +1,10 @@
 package com.typewritermc.engine.paper.events
 
-import com.typewritermc.engine.paper.utils.server
+import org.bukkit.Bukkit
 import org.bukkit.event.Event
 import org.bukkit.event.HandlerList
 
-class TypewriterUnloadEvent : Event(!server.isPrimaryThread) {
+class TypewriterUnloadEvent : Event(!Bukkit.isGlobalTickThread()) {
     override fun getHandlers(): HandlerList = HANDLER_LIST
 
     companion object {

@@ -10,6 +10,7 @@ import org.bukkit.entity.Player
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
 import java.util.*
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.reflect.KClass
 
 abstract class SingleKeyedFilter<E : AudienceFilterEntry, K, D : PlayerSingleKeyedDisplay<E, K>>(
@@ -17,7 +18,7 @@ abstract class SingleKeyedFilter<E : AudienceFilterEntry, K, D : PlayerSingleKey
     private val createDisplay: (Player) -> D,
 ) : AudienceFilter(ref), TickableDisplay {
     protected abstract val displays: MutableMap<MultiKey<UUID, K>, D>
-    private val previousKeys = mutableMapOf<UUID, K>()
+    private val previousKeys = ConcurrentHashMap<UUID, K>()
 
     abstract fun key(player: Player): K
 
@@ -53,16 +54,16 @@ abstract class SingleKeyedFilter<E : AudienceFilterEntry, K, D : PlayerSingleKey
     }
 
     override fun tick() {
-        consideredPlayers.forEach { player ->
-            val oldKey = previousKeys[player.uniqueId] ?: return@forEach
+        forEachConsideredPlayer { player ->
+            val oldKey = previousKeys[player.uniqueId] ?: return@forEachConsideredPlayer
             val newKey = key(player)
             previousKeys[player.uniqueId] = newKey
-            if (oldKey == newKey) return@forEach
-            removePlayerFromDisplay(player, oldKey)
-            addPlayerToDisplay(player, newKey)
+            if (oldKey != newKey) {
+                removePlayerFromDisplay(player, oldKey)
+                addPlayerToDisplay(player, newKey)
+            }
+            displays[player.uniqueId, newKey]?.takeIf { it.ref == ref }?.tick()
         }
-
-        displays.values.forEach { it.tick() }
     }
 
     override fun onPlayerRemove(player: Player) {

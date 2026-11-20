@@ -3,6 +3,7 @@ package com.typewritermc.engine.paper.entry.entity
 import com.typewritermc.engine.paper.entry.entries.EntityProperty
 import org.bukkit.entity.Player
 import java.util.*
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.reflect.KClass
 import kotlin.reflect.full.safeCast
 
@@ -15,7 +16,7 @@ data class EntityIdentity(val entityId: Int, val entityUuid: UUID)
 abstract class FakeEntity(
     protected val player: Player
 ) {
-    protected val properties = mutableMapOf<KClass<*>, EntityProperty>()
+    protected val properties = ConcurrentHashMap<KClass<*>, EntityProperty>()
 
     abstract val identity: EntityIdentity
 
@@ -55,6 +56,12 @@ abstract class FakeEntity(
     abstract fun removePassenger(entity: FakeEntity)
     abstract operator fun contains(entityId: Int): Boolean
     open fun dispose() {
+        properties.clear()
+    }
+
+    /** Releases references after the viewer retires, without reading live state or sending packets. */
+    open fun retireResources() {
+        properties.clear()
     }
 
     fun <P : EntityProperty> property(type: KClass<P>): P? {

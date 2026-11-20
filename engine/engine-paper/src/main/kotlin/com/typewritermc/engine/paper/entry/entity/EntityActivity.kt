@@ -117,7 +117,7 @@ interface ActivityContext {
     val entityState: EntityState
 
     val randomViewer: Player?
-        get() = viewers.randomOrNull()
+        get() = viewers.filter { com.typewritermc.engine.paper.utils.foliaScheduler.owns(it) }.randomOrNull()
 }
 
 class SharedActivityContext(

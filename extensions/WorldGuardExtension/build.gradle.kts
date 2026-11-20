@@ -8,11 +8,10 @@ repositories {
 }
 
 dependencies {
-    compileOnly("com.sk89q.worldguard:worldguard-bukkit:7.0.16") {
-        exclude(group = "com.google.guava")
-        exclude(group = "com.google.code.gson")
-        exclude(group = "it.unimi.dsi")
-    }
+    compileOnly(files("../../compile-libs/worldguard-bukkit-7.0.19.jar"))
+    testImplementation(files("../../compile-libs/worldguard-bukkit-7.0.19.jar"))
+    compileOnly(files("../../compile-libs/WorldEdit-7.4.5-foliafix-1.jar"))
+    testImplementation(files("../../compile-libs/WorldEdit-7.4.5-foliafix-1.jar"))
 }
 
 typewriter {

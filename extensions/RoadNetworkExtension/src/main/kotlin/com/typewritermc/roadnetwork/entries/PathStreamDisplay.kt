@@ -17,7 +17,9 @@ import com.typewritermc.engine.paper.entry.entries.PassThroughFilter
 import com.typewritermc.engine.paper.entry.entries.TickableDisplay
 import com.typewritermc.engine.paper.entry.inAudience
 import com.typewritermc.engine.paper.snippets.snippet
-import com.typewritermc.engine.paper.utils.firstWalkableLocationBelow
+import com.typewritermc.engine.paper.utils.firstWalkableLocationBelowAsync
+import com.typewritermc.engine.paper.utils.entityDispatcher
+import com.typewritermc.engine.paper.utils.foliaScheduler
 import com.typewritermc.engine.paper.utils.position
 import com.typewritermc.engine.paper.utils.toBukkitWorld
 import com.typewritermc.engine.paper.utils.toPosition
@@ -29,13 +31,12 @@ import com.typewritermc.roadnetwork.pathfinding.pathetic.PathCalculationResult
 import com.typewritermc.roadnetwork.roadNetworkMaxDistance
 import de.bsommerfeld.pathetic.bukkit.mapper.BukkitMapper
 import kotlinx.coroutines.*
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import org.bukkit.entity.Player
 import org.koin.core.component.KoinComponent
 import java.time.Duration
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.time.Duration.Companion.seconds
 
 class SinglePathStreamDisplay(
@@ -61,7 +62,7 @@ class SinglePathStreamDisplay(
     }
 
     override fun tick() {
-        players.forEach { player ->
+        forEachPlayer { player ->
             producers.computeIfPresent(player.uniqueId) { _, producer ->
                 val entry = this.display(player).get()
                 val id = entry?.id ?: ""
@@ -79,9 +80,6 @@ class SinglePathStreamDisplay(
                 )).apply { tick() }
             }
         }
-        producers.values.forEach {
-            it.tick()
-        }
     }
 }
 
@@ -92,7 +90,7 @@ class MultiPathStreamDisplay(
     private val producers = ConcurrentHashMap<UUID, MutableMap<String, PathStreamProducer>>()
 
     override fun tick() {
-        players.forEach { player ->
+        forEachPlayer { player ->
             producers.computeIfPresent(player.uniqueId) { _, displays ->
                 val streams = streams(player).associateBy { it.id }
                 streams.filter { it.key !in displays }.forEach { (key, stream) ->
@@ -175,6 +173,9 @@ fun List<Ref<PathStreamDisplayEntry>>.highestPathStreamDisplayEntry(
 interface PathStreamDisplay {
     fun display(position: Position)
     fun dispose()
+
+    /** Releases private resources after viewer retirement without accessing live state or sending packets. */
+    fun retireResources() {}
 }
 
 
@@ -198,9 +199,27 @@ abstract class PathStream(
     abstract fun forwardPath(): Position
     abstract fun shouldContinue(): Boolean
 
-    open fun dispose() {
-        displays.forEach { it.dispose() }
+    open fun dispose() = cleanup(true)
+
+    fun retireResources() = cleanup(false)
+
+    private fun cleanup(onOwner: Boolean) {
+        var failure: Throwable? = null
+        fun cleanup(action: () -> Unit) {
+            try {
+                action()
+            } catch (error: Throwable) {
+                if (failure == null) failure = error
+                else if (failure !== error) failure!!.addSuppressed(error)
+            }
+        }
+        displays.forEach { cleanup(if (onOwner) it::dispose else it::retireResources) }
+        cleanup(::disposeResources)
+        failure?.let { throw it }
     }
+
+    /** Cancels calculation resources after viewer retirement; must not access live Bukkit state. */
+    open fun disposeResources() {}
 }
 
 typealias PathStreamDisplaysSupplier = (Player) -> List<PathStreamDisplay>
@@ -224,77 +243,85 @@ abstract class PathStreamProducer(
     protected val gps = PointToPointGPS(
         roadNetwork,
         {
-            val position = startPosition(player)
-            position.firstWalkableLocationBelow() ?: position
+            val position = withContext(player.entityDispatcher) { startPosition(player) }
+            position.firstWalkableLocationBelowAsync() ?: position
         },
         {
-            val position = endPosition(player)
-            position.firstWalkableLocationBelow() ?: position
+            val position = withContext(player.entityDispatcher) { endPosition(player) }
+            position.firstWalkableLocationBelowAsync() ?: position
         },
     )
 
     protected var lastRefresh = 0L
-    protected var job: Job? = null
-
-    protected val mutex = Mutex()
+    @Volatile protected var job: Job? = null
+    private val disposed = AtomicBoolean()
+    private val pendingTick = AtomicBoolean()
     protected val streams = mutableListOf<PathStream>()
 
     abstract suspend fun refreshPath(): PathStream?
 
     fun tick() {
+        if (disposed.get()) return
+        if (!foliaScheduler.owns(player)) {
+            if (!pendingTick.compareAndSet(false, true)) return
+            foliaScheduler.atEntity(player, {
+                pendingTick.set(false)
+                tick()
+            }, { pendingTick.set(false) }, 1L)
+            return
+        }
         if (job?.isActive == false) {
             lastRefresh = System.currentTimeMillis()
             job = null
         }
         if (job == null && (System.currentTimeMillis() - lastRefresh) > refreshDuration.toMillis()) {
-            job = Dispatchers.UntickedAsync.launch {
+            job = player.entityDispatcher.launch {
                 withTimeout(30.seconds) {
                     val stream = refreshPath() ?: return@withTimeout
-                    mutex.withLock { streams.add(stream) }
+                    synchronized(streams) {
+                        if (disposed.get()) stream.dispose()
+                        else streams.add(stream)
+                    }
                 }
             }
         }
 
-        Dispatchers.Unconfined.launch {
-            mutex.lock()
-            try {
-                var writeIndex = 0
-                for (readIndex in 0..streams.lastIndex) {
-                    val stream = streams[readIndex]
-                    val retain = withTimeoutOrNull(5.seconds) {
-                        try {
-                            stream.tick()
-                        } catch (e: Throwable) {
-                            e.printStackTrace()
-                            false
-                        }
-                    } ?: false
-                    if (!retain) {
-                        stream.dispose()
-                        continue
-                    }
-
-                    if (writeIndex != readIndex) {
-                        streams[writeIndex] = stream
-                    }
-                    writeIndex++
+        synchronized(streams) {
+            if (disposed.get()) return
+            val iterator = streams.iterator()
+            while (iterator.hasNext()) {
+                val stream = iterator.next()
+                val retain = try {
+                    stream.tick()
+                } catch (error: Exception) {
+                    error.printStackTrace()
+                    false
                 }
-
-                if (writeIndex < streams.size) {
-                    for (removeIndex in streams.lastIndex downTo writeIndex)
-                        streams.removeAt(removeIndex)
+                if (!retain) {
+                    iterator.remove()
+                    stream.dispose()
                 }
-            } finally {
-                mutex.unlock()
             }
         }
     }
 
     open fun dispose() {
+        if (!disposed.compareAndSet(false, true)) return
         job?.cancel()
         job = null
-        streams.forEach { it.dispose() }
-        streams.clear()
+        if (foliaScheduler.owns(player)) disposeStreams(true)
+        else foliaScheduler.atEntity(player, { disposeStreams(true) }, { disposeStreams(false) }, 1L)
+    }
+
+    private fun disposeStreams(onOwner: Boolean) {
+        val previous = synchronized(streams) { streams.toList().also { streams.clear() } }
+        previous.forEach { stream ->
+            try {
+                if (onOwner) stream.dispose() else stream.retireResources()
+            } catch (error: Exception) {
+                error.printStackTrace()
+            }
+        }
     }
 
     suspend fun calculatePathing(): Pair<List<GPSEdge>, List<List<Position>>>? {
@@ -305,9 +332,9 @@ abstract class PathStreamProducer(
         return edges to path
     }
 
-    fun points(): Pair<Position, Position>? {
-        val start = startPosition(player).firstWalkableLocationBelow() ?: return null
-        val end = endPosition(player).firstWalkableLocationBelow() ?: return null
+    suspend fun points(): Pair<Position, Position>? {
+        val start = withContext(player.entityDispatcher) { startPosition(player) }.firstWalkableLocationBelowAsync() ?: return null
+        val end = withContext(player.entityDispatcher) { endPosition(player) }.firstWalkableLocationBelowAsync() ?: return null
 
         // When the start and end location are the same, we don't need to find a path.
         if ((start.distanceSquared(end) ?: Double.MAX_VALUE) < 1) {

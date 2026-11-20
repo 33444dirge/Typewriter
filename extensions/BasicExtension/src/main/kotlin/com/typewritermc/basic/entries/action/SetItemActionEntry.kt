@@ -1,5 +1,7 @@
 package com.typewritermc.basic.entries.action
 
+import com.typewritermc.engine.paper.utils.entityDispatcher
+
 import com.typewritermc.core.books.pages.Colors
 import com.typewritermc.core.entries.Ref
 import com.typewritermc.core.extension.annotations.Entry
@@ -33,7 +35,7 @@ class SetItemActionEntry(
     val slot: Var<Int> = ConstVar(0),
 ) : ActionEntry {
     override fun ActionTrigger.execute() {
-        Dispatchers.Sync.launch {
+        player.entityDispatcher.launch {
             player.inventory.setItem(slot.get(player, context), item.get(player, context).build(player, context))
         }
     }

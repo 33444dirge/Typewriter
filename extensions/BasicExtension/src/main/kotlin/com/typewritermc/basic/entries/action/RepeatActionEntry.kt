@@ -1,5 +1,7 @@
 package com.typewritermc.basic.entries.action
 
+import com.typewritermc.engine.paper.utils.entityDispatcher
+
 import com.typewritermc.core.books.pages.Colors
 import com.typewritermc.core.entries.Ref
 import com.typewritermc.core.extension.annotations.Default
@@ -55,7 +57,7 @@ class RepeatActionEntry(
         val repeatInterval = interval.get(player, context).toMillis()
         val delayMillis = repeatInterval.coerceAtLeast(50)
 
-        Dispatchers.UntickedAsync.launch {
+        player.entityDispatcher.launch {
             repeat(repeatAmount) {
                 triggerManually()
                 delay(delayMillis)

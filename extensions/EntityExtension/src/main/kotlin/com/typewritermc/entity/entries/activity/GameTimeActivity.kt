@@ -10,7 +10,7 @@ import com.typewritermc.engine.paper.entry.entity.PositionProperty
 import com.typewritermc.engine.paper.entry.entity.SingleChildActivity
 import com.typewritermc.engine.paper.entry.entries.EntityActivityEntry
 import com.typewritermc.engine.paper.entry.entries.GenericEntityActivityEntry
-import com.typewritermc.engine.paper.utils.toBukkitWorld
+import com.typewritermc.engine.paper.utils.WorldTimeSnapshots
 
 @Entry("game_time_activity", "A game time activity", Colors.PALATINATE_BLUE, "bi:clock-fill")
 /**
@@ -74,9 +74,7 @@ class GameTimeActivity(
     startLocation: PositionProperty,
 ) : SingleChildActivity<ActivityContext>(startLocation) {
     override fun currentChild(context: ActivityContext): Ref<out EntityActivityEntry> {
-        val world = currentPosition.world.toBukkitWorld()
-
-        val worldTime = world.time % 24000
+        val worldTime = WorldTimeSnapshots[currentPosition.world.identifier]?.time ?: return defaultActivity
         return activities.firstOrNull { it.contains(worldTime) }
             ?.activity
             ?: defaultActivity

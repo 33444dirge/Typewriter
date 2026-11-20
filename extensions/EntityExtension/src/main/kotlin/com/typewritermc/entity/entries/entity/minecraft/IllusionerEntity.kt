@@ -96,6 +96,11 @@ private class IllusionerEntity(player: Player) : WrapperFakeEntity(
         rideableSitting.dispose()
         super.dispose()
     }
+
+    override fun retireResources() {
+        rideableSitting.retireResources()
+        super.retireResources()
+    }
 }
 
 // Skipped data (no existing data entry available):

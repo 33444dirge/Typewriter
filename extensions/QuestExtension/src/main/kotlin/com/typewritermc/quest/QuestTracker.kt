@@ -1,11 +1,14 @@
 package com.typewritermc.quest
 
+import com.typewritermc.engine.paper.utils.entityDispatcher
+
 import com.typewritermc.core.entries.Query
 import com.typewritermc.core.entries.Ref
 import com.typewritermc.core.entries.ref
 import com.typewritermc.core.extension.annotations.Factory
 import com.typewritermc.core.extension.annotations.Parameter
 import com.typewritermc.core.interaction.SessionTracker
+import com.typewritermc.core.interaction.RetirableSessionTracker
 import com.typewritermc.core.utils.UntickedAsync
 import com.typewritermc.core.utils.launch
 import com.typewritermc.engine.paper.interaction.PlayerSessionManager
@@ -30,7 +33,7 @@ private const val REFRESH_INTERVAL_TICKS = 10
 class QuestTracker(
     @Parameter
     val player: Player,
-) : SessionTracker {
+) : SessionTracker, RetirableSessionTracker {
     private val quests = ConcurrentHashMap<Ref<QuestEntry>, QuestStatus>()
     private var trackedQuest: Ref<QuestEntry>? = null
     private var tickCounter = 0
@@ -46,7 +49,12 @@ class QuestTracker(
             .forEach { refresh(it.ref()) }
     }
 
-    override fun teardown() {}
+    override fun teardown() = retire()
+
+    override fun retire() {
+        quests.clear()
+        trackedQuest = null
+    }
 
     private fun refresh(ref: Ref<QuestEntry>) {
         val quest = ref.get() ?: return
@@ -64,7 +72,7 @@ class QuestTracker(
         }
 
         if (oldStatus == null) return
-        Dispatchers.UntickedAsync.launch {
+        player.entityDispatcher.launch {
             AsyncQuestStatusUpdate(player, ref, oldStatus, status).callEvent()
 
             if (trackedQuest == ref && status != QuestStatus.ACTIVE) {
@@ -84,7 +92,7 @@ class QuestTracker(
     fun trackQuest(quest: Ref<QuestEntry>) {
         val from = trackedQuest
         trackedQuest = quest
-        Dispatchers.UntickedAsync.launch {
+        player.entityDispatcher.launch {
             AsyncTrackedQuestUpdate(player, from, quest).callEvent()
         }
     }
@@ -92,7 +100,7 @@ class QuestTracker(
     fun unTrackQuest() {
         val from = trackedQuest
         trackedQuest = null
-        Dispatchers.UntickedAsync.launch {
+        player.entityDispatcher.launch {
             AsyncTrackedQuestUpdate(player, from, null).callEvent()
         }
     }

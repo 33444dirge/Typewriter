@@ -1,6 +1,6 @@
 package lirand.api.extensions.server
 
-import com.github.shynixn.mccoroutine.bukkit.registerSuspendingEvents
+import com.github.shynixn.mccoroutine.folia.registerSuspendingEvents
 import org.bukkit.NamespacedKey
 import org.bukkit.event.Listener
 import org.bukkit.plugin.Plugin
@@ -11,4 +11,4 @@ fun Plugin.registerEvents(
 
 fun Plugin.registerSuspendingEvents(
 	vararg listeners: Listener
-) = listeners.forEach { server.pluginManager.registerSuspendingEvents(it, this) }
+) = listeners.forEach { server.pluginManager.registerSuspendingEvents(it, this, emptyMap()) }

@@ -21,3 +21,7 @@ typewriter {
         paper()
     }
 }
+
+tasks.withType<Jar>().configureEach {
+    manifest.attributes("Typewriter-Performance-Revision" to "bounded-resources-20261108-1")
+}

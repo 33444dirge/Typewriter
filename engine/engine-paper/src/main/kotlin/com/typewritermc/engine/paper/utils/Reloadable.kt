@@ -15,6 +15,7 @@ class Reloadable<T>(private val loader: () -> T) : ReadOnlyProperty<Any?, T> {
         plugin.listen<TypewriterUnloadEvent> { reload() }
     }
 
+    @Synchronized
     fun get(): T {
         val value = this.value
         if (value == null) {
@@ -25,6 +26,7 @@ class Reloadable<T>(private val loader: () -> T) : ReadOnlyProperty<Any?, T> {
         return value
     }
 
+    @Synchronized
     private fun reload() {
         value = null
     }

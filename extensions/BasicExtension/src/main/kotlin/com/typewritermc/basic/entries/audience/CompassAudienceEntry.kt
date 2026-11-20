@@ -47,7 +47,7 @@ class CompassAudienceDisplay(
     }
 
     override fun tick() {
-        players.forEach(::applyTarget)
+        forEachPlayer(::applyTarget)
     }
 
     override fun onPlayerRemove(player: Player) {

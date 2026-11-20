@@ -1,5 +1,7 @@
 package com.typewritermc.basic.entries.action
 
+import com.typewritermc.engine.paper.utils.entityDispatcher
+
 import com.typewritermc.core.books.pages.Colors
 import com.typewritermc.core.entries.Ref
 import com.typewritermc.core.extension.annotations.ContextKeys
@@ -47,7 +49,7 @@ class RemoveItemActionEntry(
     val item: Var<Item> = ConstVar(Item.Empty),
 ) : ActionEntry {
     override fun ActionTrigger.execute() {
-        Dispatchers.Sync.launch {
+        player.entityDispatcher.launch {
             val item = item.get(player, context)
             var removedAmount = 0
             var remainingAmount = 0

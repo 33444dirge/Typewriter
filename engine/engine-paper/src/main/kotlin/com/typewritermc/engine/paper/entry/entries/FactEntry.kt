@@ -6,7 +6,10 @@ import com.typewritermc.core.extension.annotations.MultiLine
 import com.typewritermc.core.extension.annotations.Tags
 import com.typewritermc.core.utils.formatCompact
 import com.typewritermc.engine.paper.entry.*
+import com.typewritermc.engine.paper.entry.entity.snapshotGroupId
+import com.typewritermc.engine.paper.entry.entity.ViewerSnapshots
 import com.typewritermc.engine.paper.facts.FactData
+import com.typewritermc.engine.paper.facts.FactChange
 import com.typewritermc.engine.paper.facts.FactDatabase
 import com.typewritermc.engine.paper.facts.FactId
 import com.typewritermc.engine.paper.utils.server
@@ -34,7 +37,7 @@ interface FactEntry : StaticEntry {
 
         val groupId = if (entry != null) {
             // If the player is not in an group, we don't want to do anything with this fact
-            entry.groupId(player) ?: return null
+            entry.snapshotGroupId(player) ?: return null
         } else {
             // If no group entry is set, we assume that the player is the group for backwards compatibility
             GroupId(player.uniqueId)
@@ -56,10 +59,10 @@ interface ReadableFactEntry : FactEntry, PlaceholderEntry {
         if (entry == null) {
             // If no group entry is set, we assume that the player is the group for backwards compatibility
             val player = server.getPlayer(UUID.fromString(groupId.id)) ?: return FactData(0)
-            return readSinglePlayer(player)
+            return ViewerSnapshots.readFact(this, player)
         }
         val group = entry.group(groupId)
-        return group.players.map { readSinglePlayer(it) }.let { FactData(it.sumOf(FactData::value)) }
+        return group.players.map { ViewerSnapshots.readFact(this, it) }.let { FactData(it.sumOf(FactData::value)) }
     }
 
     /**
@@ -137,12 +140,20 @@ interface CachableFactEntry : ReadableFactEntry,
     }
 
     override fun write(id: FactId, value: Int) {
-        if (!canCache(id, read(id))) return
         val factDatabase: FactDatabase = get(FactDatabase::class.java)
-        factDatabase[id] = FactData(value)
+        factDatabase.update(id) { previous -> if (canCache(id, previous)) FactData(value) else previous }
     }
 
     fun canCache(id: FactId, factData: FactData): Boolean = true
+
+    /** Adds to a shared fact atomically and returns only this operation's before/after values. */
+    fun add(player: Player, amount: Int): FactChange? {
+        val factId = identifier(player) ?: return null
+        val factDatabase: FactDatabase = get(FactDatabase::class.java)
+        return factDatabase.update(factId) { previous ->
+            if (canCache(factId, previous)) FactData(previous.value + amount) else previous
+        }
+    }
 }
 
 @Tags("persistable-fact")

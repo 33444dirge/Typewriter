@@ -3,13 +3,14 @@ package com.typewritermc.engine.paper.entry.temporal
 import com.typewritermc.core.entries.Query
 import com.typewritermc.core.interaction.ContextModifier
 import com.typewritermc.core.interaction.Interaction
+import com.typewritermc.core.interaction.RetirableInteraction
 import com.typewritermc.core.interaction.InteractionContext
-import com.typewritermc.core.utils.UntickedAsync
 import com.typewritermc.core.utils.failure
 import com.typewritermc.core.utils.ok
-import com.typewritermc.core.utils.switchContext
+import com.typewritermc.engine.paper.utils.entityDispatcher
 import com.typewritermc.engine.paper.entry.entries.CinematicAction
 import com.typewritermc.engine.paper.entry.entries.CinematicEntry
+import com.typewritermc.engine.paper.entry.entries.RetirableCinematicAction
 import com.typewritermc.engine.paper.entry.entries.EventTrigger
 import com.typewritermc.engine.paper.entry.matches
 import com.typewritermc.engine.paper.entry.temporal.TemporalState.ENDING
@@ -20,7 +21,7 @@ import com.typewritermc.engine.paper.events.AsyncCinematicEndEvent
 import com.typewritermc.engine.paper.events.AsyncCinematicStartEvent
 import com.typewritermc.engine.paper.events.AsyncCinematicTickEvent
 import com.typewritermc.engine.paper.interaction.*
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
@@ -34,7 +35,7 @@ class TemporalInteraction(
     private val startContext: InteractionContext,
     val eventTriggers: List<EventTrigger>,
     private val settings: TemporalSettings,
-) : Interaction {
+) : Interaction, RetirableInteraction {
     internal var state = STARTING
         private set
     private var playTime = Duration.ofMillis(-1)
@@ -71,7 +72,7 @@ class TemporalInteraction(
 
         state = PLAYING
 
-        Dispatchers.UntickedAsync.switchContext {
+        withContext(player.entityDispatcher) {
             AsyncCinematicStartEvent(player, pageId).callEvent()
         }
         return ok(Unit)
@@ -105,6 +106,17 @@ class TemporalInteraction(
 
     private val canEnd get() = actions.all { it.canFinish(frame) }
 
+    override fun retire() {
+        if (!::actions.isInitialized) return
+        actions.filterIsInstance<RetirableCinematicAction>().forEach {
+            try {
+                it.retire()
+            } catch (error: Exception) {
+                error.printStackTrace()
+            }
+        }
+    }
+
     override suspend fun teardown() {
         if (state != PLAYING) return
         state = ENDING
@@ -124,7 +136,7 @@ class TemporalInteraction(
             }
         }
 
-        Dispatchers.UntickedAsync.switchContext {
+        withContext(player.entityDispatcher) {
             AsyncCinematicEndEvent(player, originalFrame, pageId).callEvent()
         }
     }

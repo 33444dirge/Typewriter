@@ -73,12 +73,11 @@ class FactValueCappedAudienceFilter(
         factValues[player.uniqueId] = factEntry?.readForPlayersGroup(player)?.value ?: 0
     }
 
+    override fun refreshPlayer(player: Player) = updateFactValue(player)
+
     override fun updateCandidates() {
         val players = consideredPlayers
-        val cap = capacity.get(players.firstOrNull() ?: return).coerceAtLeast(0)
-
-        // Update all fact values for considered players
-        consideredPlayers.forEach { updateFactValue(it) }
+        val cap = sampledCapacity()
 
         candidates = consideredPlayers
             .map { it.uniqueId }

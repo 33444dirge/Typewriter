@@ -21,7 +21,7 @@ import com.typewritermc.roadnetwork.roadNetworkMaxDistance
 import de.bsommerfeld.pathetic.api.pathing.Pathfinder
 import de.bsommerfeld.pathetic.api.pathing.result.PathfinderResult
 import de.bsommerfeld.pathetic.api.wrapper.PathPosition
-import de.bsommerfeld.pathetic.bukkit.context.BukkitEnvironmentContext
+import com.typewritermc.roadnetwork.pathfinding.pathetic.findSnapshotPath
 import de.bsommerfeld.pathetic.bukkit.mapper.BukkitMapper
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -151,15 +151,10 @@ private suspend fun findPathCore(
         null
     ) { parametersOf(nodeValidationProcessor, nodeCostProcessor) }
 
-    val calculatedPath = suspendCancellableCoroutine<PathfinderResult?> { continuation ->
-        val search = pathfinder
-            .findPath(startPathPos, targetPathPos, BukkitEnvironmentContext(startPosition.world.toBukkitWorld()))
-            .ifPresent { continuation.resume(it.takeIf { result -> result.successful() || (allowFallback && result.hasFallenBack()) }) }
-            .orElse { continuation.resume(null) }
-            .exceptionally { continuation.resumeWithException(it) }
-
-        continuation.invokeOnCancellation { search.abort() }
-    } ?: return PathCalculationResult.Failure
+    val calculatedPath = pathfinder.findSnapshotPath(
+        startPathPos, targetPathPos, startPosition.toBukkitLocation(),
+    )?.takeIf { it.successful() || (allowFallback && it.hasFallenBack()) }
+        ?: return PathCalculationResult.Failure
 
     if (checkIntermediateNodes) {
         val collidesWithIntermediate = intermediateNodes.any { intermediateNode ->

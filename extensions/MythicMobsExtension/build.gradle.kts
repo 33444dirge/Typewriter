@@ -7,7 +7,8 @@ repositories {
 }
 
 dependencies {
-    compileOnly("io.lumine:Mythic-Dist:5.12.0")
+    compileOnly(files("../../compile-libs/MythicMobs-5.13.1-20260807.jar"))
+    testImplementation(files("../../compile-libs/MythicMobs-5.13.1-20260807.jar"))
 }
 
 typewriter {

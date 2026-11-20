@@ -1,5 +1,7 @@
 package com.typewritermc.entity.entries.activity
 
+import com.typewritermc.engine.paper.utils.foliaScheduler
+
 import com.typewritermc.core.books.pages.Colors
 import com.typewritermc.core.entries.Ref
 import com.typewritermc.core.entries.emptyRef
@@ -65,7 +67,7 @@ class AmbientSoundActivity(
             nextPlay = System.currentTimeMillis() + delay.random().toMillis()
             val sound = sounds.weightedRandom().sound
             context.viewers.forEach { viewer ->
-                sound.play(viewer, viewer.interactionContext)
+                foliaScheduler.atEntity(viewer, { sound.play(viewer, viewer.interactionContext) }, null, 1L)
             }
         }
         return super.tick(context)

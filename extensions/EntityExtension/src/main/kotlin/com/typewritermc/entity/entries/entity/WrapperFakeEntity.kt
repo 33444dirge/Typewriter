@@ -22,7 +22,7 @@ abstract class WrapperFakeEntity(
     val type: EntityType,
     player: Player,
 ) : FakeEntity(player) {
-    protected val entity: WrapperEntity by lazy(LazyThreadSafetyMode.NONE) {
+    private val packetEntity = lazy(LazyThreadSafetyMode.NONE) {
         val uuid = EntityLib.getPlatform().entityUuidProvider.provide(type)
         val entityId = EntityLib.getPlatform().entityIdProvider.provide(uuid, type)
         val metaData = EntityMeta.createMeta(entityId, type)
@@ -32,6 +32,7 @@ abstract class WrapperFakeEntity(
             else -> WrapperEntity(entityId, uuid, type, metaData)
         }
     }
+    protected val entity: WrapperEntity by packetEntity
 
     override val identity: EntityIdentity
         get() = EntityIdentity(entity.entityId, entity.uuid)
@@ -86,8 +87,24 @@ abstract class WrapperFakeEntity(
     override fun contains(entityId: Int): Boolean = entityId == entity.entityId
 
     override fun dispose() {
-        super.dispose()
-        entity.despawn()
-        entity.remove()
+        try {
+            if (packetEntity.isInitialized()) {
+                entity.despawn()
+                entity.remove()
+            }
+        } finally {
+            retireResources()
+        }
     }
+
+    override fun retireResources() {
+        if (packetEntity.isInitialized()) packetEntity.value.releaseWithoutViewer()
+        super.retireResources()
+    }
+}
+
+internal fun WrapperEntity.releaseWithoutViewer() {
+    viewers.toList().forEach(::removeViewerSilently)
+    clearViewerRules()
+    parentContainer?.removeEntity(this, false)
 }

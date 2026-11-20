@@ -9,12 +9,14 @@ import com.typewritermc.engine.paper.entry.Criteria
 import com.typewritermc.engine.paper.entry.entries.*
 import com.typewritermc.engine.paper.entry.temporal.SimpleCinematicAction
 import com.typewritermc.engine.paper.logger
+import com.typewritermc.engine.paper.utils.entityDispatcher
 import io.lumine.mythic.api.mobs.GenericCaster
 import io.lumine.mythic.bukkit.BukkitAdapter
 import io.lumine.mythic.bukkit.MythicBukkit
 import io.lumine.mythic.core.skills.SkillMetadataImpl
 import io.lumine.mythic.core.skills.SkillTriggers
 import org.bukkit.entity.Player
+import kotlinx.coroutines.withContext
 
 @Entry("mythicskill_cinematic", "Trigger a MythicSkill during a cinematic", Colors.PURPLE, "fa6-solid:bolt-lightning")
 /**
@@ -61,6 +63,7 @@ class SkillCinematicAction(
     override suspend fun startSegment(segment: MythicSkillSegment) {
         super.startSegment(segment)
 
+        withContext(player.entityDispatcher) {
         val skillName = segment.skillName.get(player)
         val skill = MythicBukkit.inst().skillManager.getSkill(skillName).orElseGet {
             throw IllegalArgumentException("Skill $skillName not found")
@@ -73,6 +76,7 @@ class SkillCinematicAction(
             SkillMetadataImpl(SkillTriggers.API, caster, trigger)
 
         if (skill.isUsable(skillMeta)) skill.execute(skillMeta)
-        else logger.warning("Skill ${segment.skillName} is not usable at this time (cooldown, etc.)")
+        else logger.warning("Skill $skillName is not usable at this time (cooldown, etc.)")
+        }
     }
 }

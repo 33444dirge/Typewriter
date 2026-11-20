@@ -1,5 +1,7 @@
 package com.typewritermc.basic.entries.action
 
+import com.typewritermc.engine.paper.utils.entityDispatcher
+
 import com.typewritermc.core.books.pages.Colors
 import com.typewritermc.core.entries.Ref
 import com.typewritermc.core.extension.annotations.Entry
@@ -42,7 +44,7 @@ class GiveItemActionEntry(
     override fun ActionTrigger.execute() {
         // Build the item before modifying fact or continuing other triggers to ensure that the item is built with the correct state and context.
         val itemStack = item.get(player, context).build(player, context)
-        Dispatchers.Sync.launch {
+        player.entityDispatcher.launch {
             val leftOver = player.inventory.addItem(itemStack)
             leftOver.values.forEach {
                 player.world.dropItemNaturally(player.location, it)

@@ -1,6 +1,14 @@
 repositories { }
+tasks.withType<Jar>().configureEach {
+    manifest.attributes["Typewriter-Dialogue-Revision"] = "external-overlay-persistent-20261108-3"
+    manifest.attributes["Typewriter-Camera-Revision"] = "stationary-camera-20261108-2"
+}
+
 dependencies {
     implementation("com.mthaler:aparser:0.4.0")
+    testImplementation("com.github.shynixn.mccoroutine:mccoroutine-folia-api:2.22.0")
+    testImplementation("org.geysermc.geyser:api:2.9.5-SNAPSHOT")
+    testImplementation("org.geysermc.floodgate:api:2.2.5-SNAPSHOT")
 }
 
 typewriter {

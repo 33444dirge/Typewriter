@@ -1,5 +1,7 @@
 package com.typewritermc.basic.entries.cinematic
 
+import com.typewritermc.engine.paper.utils.entityDispatcher
+
 import com.typewritermc.core.extension.annotations.Colored
 import com.typewritermc.core.extension.annotations.Help
 import com.typewritermc.core.extension.annotations.MultiLine
@@ -106,7 +108,7 @@ class DisplayDialogueCinematicAction(
         super.teardown()
         teardown?.invoke(player)
         reset?.invoke(player)
-        Dispatchers.Sync.switchContext {
+        player.entityDispatcher.switchContext {
             player.restore(state)
         }
     }

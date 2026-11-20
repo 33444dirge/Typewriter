@@ -5,6 +5,7 @@ import com.typewritermc.core.entries.Ref
 import com.typewritermc.core.extension.annotations.Entry
 import com.typewritermc.core.extension.annotations.Help
 import com.typewritermc.core.interaction.context
+import com.typewritermc.core.utils.launch
 import com.typewritermc.engine.paper.command.dsl.playersResolver
 import com.typewritermc.engine.paper.command.dsl.sender
 import com.typewritermc.engine.paper.command.dsl.withPermission
@@ -13,6 +14,7 @@ import com.typewritermc.engine.paper.entry.entries.CustomCommandEntry
 import com.typewritermc.engine.paper.entry.entries.EventEntry
 import com.typewritermc.engine.paper.entry.triggerAllFor
 import com.typewritermc.engine.paper.utils.msg
+import com.typewritermc.engine.paper.utils.entityDispatcher
 import io.papermc.paper.command.brigadier.CommandSourceStack
 import org.bukkit.entity.Player
 
@@ -53,7 +55,9 @@ class RunCommandEventEntry(
                     return@executes
                 }
                 players.forEach { player ->
-                    triggerAllFor(player, context())
+                    player.entityDispatcher.launch {
+                        triggerAllFor(player, context())
+                    }
                 }
                 sender.msg("Triggered $command for <green>${players.joinToString(", ") { it.name }}</green>.")
             }

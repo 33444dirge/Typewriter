@@ -10,9 +10,16 @@ import com.typewritermc.engine.paper.plugin
 import com.typewritermc.engine.paper.utils.server
 import lirand.api.extensions.events.unregister
 import org.bukkit.entity.Player
+import org.bukkit.Bukkit
+import com.typewritermc.engine.paper.utils.foliaScheduler
 import org.bukkit.event.Listener
 import org.koin.java.KoinJavaComponent.get
 import java.util.*
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 
 /**
@@ -66,9 +73,14 @@ enum class AudienceDisplayState(val displayName: String, val color: String) {
 }
 
 abstract class AudienceDisplay : Listener {
+    @Volatile
     var isActive = false
         private set
     private val memberIds: MutableSet<UUID> = Sets.newConcurrentHashSet()
+    private val pendingTicks = ConcurrentHashMap<UUID, Any>()
+    private val closed = AtomicBoolean()
+    private val lifecycle = Any()
+    protected val isClosed: Boolean get() = closed.get()
 
     /** The ids of the players in the audience, as a live view that allocates nothing. */
     open val playerIds: Set<UUID> get() = memberIds
@@ -93,19 +105,87 @@ abstract class AudienceDisplay : Listener {
     }
 
     fun addPlayer(player: Player) {
-        if (memberIds.isEmpty()) initialize()
-        if (!memberIds.add(player.uniqueId)) return
+        if (closed.get()) return
+        if (!Bukkit.isOwnedByCurrentRegion(player)) {
+            foliaScheduler.atEntity(player, { addPlayer(player) }, null, 1L)
+            return
+        }
+        synchronized(lifecycle) {
+            if (closed.get() || player.uniqueId in memberIds) return
+            if (!isActive) initialize()
+            memberIds.add(player.uniqueId)
+        }
         onPlayerAdd(player)
     }
 
     fun removePlayer(player: Player) {
+        pendingTicks.remove(player.uniqueId)
+        if (!Bukkit.isOwnedByCurrentRegion(player)) {
+            foliaScheduler.atEntity(player, { removePlayer(player) }, { memberIds.remove(player.uniqueId) }, 1L)
+            return
+        }
         if (!memberIds.remove(player.uniqueId)) return
         onPlayerRemove(player)
-        if (memberIds.isEmpty()) dispose()
+        synchronized(lifecycle) {
+            if (memberIds.isEmpty() && isActive) dispose()
+        }
     }
 
     abstract fun onPlayerAdd(player: Player)
     abstract fun onPlayerRemove(player: Player)
+
+    /** Coalesces each viewer's tick and checks membership again on the owning entity thread. */
+    protected fun forEachPlayer(action: (Player) -> Unit) {
+        players.forEach { tickPlayer(it, action) }
+    }
+
+    protected fun tickPlayer(player: Player, action: (Player) -> Unit) {
+        if (closed.get() || player.uniqueId !in memberIds) return
+        val token = Any()
+        if (pendingTicks.putIfAbsent(player.uniqueId, token) != null) return
+        val run = Runnable {
+            try {
+                if (!closed.get() && pendingTicks[player.uniqueId] === token && player.uniqueId in memberIds) {
+                    action(player)
+                }
+            } finally {
+                pendingTicks.remove(player.uniqueId, token)
+            }
+        }
+        if (Bukkit.isOwnedByCurrentRegion(player)) run.run()
+        else foliaScheduler.atEntity(player, run, { pendingTicks.remove(player.uniqueId, token) }, 1L)
+    }
+
+    /** Invalidates ticks for all displays before any member is moved during an unload. */
+    fun beginClose() {
+        closed.set(true)
+        pendingTicks.clear()
+    }
+
+    /** Waits without blocking a region until each member has finished owner-context cleanup. */
+    suspend fun close() {
+        beginClose()
+        val members = memberIds.mapNotNull { server.getPlayer(it) }
+        for (player in members) {
+            suspendCancellableCoroutine<Unit> { continuation ->
+                val action = Runnable {
+                    try {
+                        removePlayer(player)
+                        if (continuation.isActive) continuation.resume(Unit)
+                    } catch (error: Throwable) {
+                        if (continuation.isActive) continuation.resumeWithException(error)
+                    }
+                }
+                if (Bukkit.isOwnedByCurrentRegion(player)) action.run()
+                else foliaScheduler.atEntity(player, action, {
+                    memberIds.remove(player.uniqueId)
+                    if (continuation.isActive) continuation.resume(Unit)
+                }, 1L)
+            }
+        }
+        memberIds.clear()
+        dispose()
+    }
 
     open operator fun contains(player: Player): Boolean = player.uniqueId in memberIds
     open operator fun contains(uuid: UUID): Boolean = uuid in memberIds
@@ -127,6 +207,10 @@ abstract class AudienceFilter(
 
     protected val consideredPlayers: List<Player> get() = super.players
 
+    protected fun forEachConsideredPlayer(action: (Player) -> Unit) {
+        consideredPlayers.forEach { tickPlayer(it, action) }
+    }
+
     override fun displayState(player: Player): AudienceDisplayState {
         if (player in this) return AudienceDisplayState.IN_AUDIENCE
         if (canConsider(player)) return AudienceDisplayState.BLOCKED
@@ -142,6 +226,10 @@ abstract class AudienceFilter(
      * @return If the player is in the audience or not
      */
     fun Player.updateFilter(isFiltered: Boolean): Boolean {
+        if (!Bukkit.isOwnedByCurrentRegion(this)) {
+            foliaScheduler.atEntity(this, { updateFilter(isFiltered) }, null, 1L)
+            return this in this@AudienceFilter
+        }
         val allow = !inverted == isFiltered && canConsider(this)
         if (allow) {
             if (filteredPlayers.add(uniqueId)) {
@@ -166,7 +254,13 @@ abstract class AudienceFilter(
      *
      * @return If the player is in the audience or not
      */
-    fun Player.refresh() = updateFilter(filter(this))
+    fun Player.refresh(): Boolean {
+        if (!Bukkit.isOwnedByCurrentRegion(this)) {
+            foliaScheduler.atEntity(this, { refresh() }, null, 1L)
+            return this in this@AudienceFilter
+        }
+        return updateFilter(filter(this))
+    }
 
     override fun onPlayerAdd(player: Player) {
         player.refresh()
@@ -182,8 +276,8 @@ abstract class AudienceFilter(
     open fun onPlayerFilterRemoved(player: Player) {
     }
 
-    fun canConsider(player: Player): Boolean = super.contains(player)
-    fun canConsider(uuid: UUID): Boolean = super.contains(uuid)
+    fun canConsider(player: Player): Boolean = !isClosed && super.contains(player)
+    fun canConsider(uuid: UUID): Boolean = !isClosed && super.contains(uuid)
 
     override fun contains(player: Player): Boolean = contains(player.uniqueId)
     override fun contains(uuid: UUID): Boolean = uuid in filteredPlayers

@@ -4,7 +4,7 @@ import org.bukkit.entity.Player
 import org.bukkit.event.HandlerList
 import org.bukkit.event.player.PlayerEvent
 
-class AsyncCinematicStartEvent(player: Player, val pageId: String) : PlayerEvent(player, true) {
+class AsyncCinematicStartEvent(player: Player, val pageId: String) : PlayerEvent(player, !org.bukkit.Bukkit.isOwnedByCurrentRegion(player)) {
     override fun getHandlers(): HandlerList = HANDLER_LIST
 
     companion object {

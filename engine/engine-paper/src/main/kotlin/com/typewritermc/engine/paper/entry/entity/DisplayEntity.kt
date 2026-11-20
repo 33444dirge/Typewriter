@@ -6,6 +6,10 @@ import com.typewritermc.engine.paper.entry.entries.PropertyCollector
 import com.typewritermc.engine.paper.entry.entries.PropertyCollectorSupplier
 import com.typewritermc.engine.paper.entry.entries.PropertySupplier
 import com.typewritermc.engine.paper.utils.toBukkitLocation
+import com.typewritermc.engine.paper.utils.foliaScheduler
+import com.typewritermc.engine.paper.utils.playStepSoundAt
+import org.bukkit.Bukkit
+import java.util.concurrent.atomic.AtomicBoolean
 import org.bukkit.SoundCategory
 import org.bukkit.entity.Player
 import org.jetbrains.annotations.ApiStatus
@@ -19,6 +23,10 @@ class DisplayEntity(
     val activityManager: ActivityManager<*>,
     val collectors: List<PropertyCollector<*>>,
 ) {
+    private val disposed = AtomicBoolean()
+    private val lifecycleLock = Any()
+    private var resourcesReleased = false
+    private val pendingTick = AtomicBoolean()
     val entity = creator.create(player)
 
     var lastSoundLocation = activityManager.position
@@ -43,15 +51,27 @@ class DisplayEntity(
     }
 
     fun tick() {
-        applyProperties()
-        entity.tick()
+        if (disposed.get()) return
+        if (!Bukkit.isOwnedByCurrentRegion(player)) {
+            if (!pendingTick.compareAndSet(false, true)) return
+            foliaScheduler.atEntity(player, {
+                pendingTick.set(false)
+                tick()
+            }, { pendingTick.set(false) }, 1L)
+            return
+        }
+        synchronized(lifecycleLock) {
+            if (disposed.get()) return
+            applyProperties()
+            entity.tick()
 
-        // When the entity has moved far enough, play a sound
-        // FIXME: Magic number
-        if ((lastSoundLocation.distanceSquared(activityManager.position) ?: 0.0) > 1.7) {
-            lastSoundLocation = activityManager.position
-            val sound = lastSoundLocation.toBukkitLocation().block.blockData.soundGroup.stepSound
-            player.playSound(lastSoundLocation.toBukkitLocation(), sound, SoundCategory.NEUTRAL, 0.4f, 1.0f)
+            if ((lastSoundLocation.distanceSquared(activityManager.position) ?: 0.0) > 1.7) {
+                lastSoundLocation = activityManager.position
+                val position = lastSoundLocation
+                player.playStepSoundAt(position.toBukkitLocation()) {
+                    !disposed.get() && lastSoundLocation == position
+                }
+            }
         }
     }
 
@@ -70,7 +90,22 @@ class DisplayEntity(
     fun <P : EntityProperty> property(type: KClass<P>) = entity.property(type)
 
     fun dispose() {
-        entity.dispose()
+        if (!disposed.compareAndSet(false, true)) return
+        if (!Bukkit.isOwnedByCurrentRegion(player)) {
+            foliaScheduler.atEntity(player, { release(true) }, { release(false) }, 1L)
+            return
+        }
+        release(true)
+    }
+
+    private fun release(onOwner: Boolean) = synchronized(lifecycleLock) {
+        if (resourcesReleased) return@synchronized
+        resourcesReleased = true
+        try {
+            if (onOwner) entity.dispose()
+        } finally {
+            entity.retireResources()
+        }
     }
 }
 

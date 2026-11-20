@@ -52,7 +52,7 @@ class FirstAddedCappedAudienceFilter(
 
     override fun updateCandidates() {
         val players = consideredPlayers
-        val cap = capacity.get(players.firstOrNull() ?: return).coerceAtLeast(0)
+        val cap = sampledCapacity()
         candidates = consideredPlayers
             .map { it.uniqueId }
             .sortedBy { joinTimes.getOrPut(it) { Instant.now() } }

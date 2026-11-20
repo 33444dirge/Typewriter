@@ -5,6 +5,8 @@ import com.typewritermc.core.extension.DependencyInject
 import com.typewritermc.core.extension.InitializableManager
 import com.typewritermc.core.utils.Reloadable
 import com.typewritermc.loader.ExtensionLoader
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
 import org.koin.core.module.dsl.singleOf
@@ -20,6 +22,12 @@ class TypewriterCore : KoinComponent, Reloadable {
     private val initializableManager by inject<InitializableManager>()
 
     override suspend fun load() {
+        withContext(Dispatchers.IO) { loadResources() }
+        dependencyInject.load()
+        initializableManager.load()
+    }
+
+    private suspend fun loadResources() {
         val extensionsDirectory = directory.resolve("extensions")
         if (!extensionsDirectory.exists()) {
             extensionsDirectory.mkdirs()
@@ -28,8 +36,6 @@ class TypewriterCore : KoinComponent, Reloadable {
         // Needs to be loaded first as it will load the classLoader
         extensionLoader.load(extensionJars)
         library.load()
-        dependencyInject.load()
-        initializableManager.load()
     }
 
     override suspend fun unload() {

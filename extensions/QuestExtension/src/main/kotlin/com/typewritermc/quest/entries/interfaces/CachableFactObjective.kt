@@ -40,17 +40,10 @@ interface CachableFactObjective : ObjectiveEntry {
     fun incrementFact(player: Player, amount: Int = 0) {
         if (!player.inAudience(this)) return
 
-        // Before values
-        // TODO: Some 1.0 thingy: Let Fact handle the increment for proper synchronization.
-        var current = progressTracking.value.get()?.readForPlayersGroup(player) ?: return
-        val completedBefore = progressTracking.isValid(current, player, player.interactionContext ?: context())
-
-        // update values
-        progressTracking.value.get()?.write(player, current.value + amount)
-
-        // After values
-        current = progressTracking.value.get()?.readForPlayersGroup(player) ?: return
-        val completedAfter = progressTracking.isValid(current, player, player.interactionContext ?: context())
+        val target = progressTracking.target.get(player, player.interactionContext ?: context())
+        val change = progressTracking.value.get()?.add(player, amount) ?: return
+        val completedBefore = progressTracking.operator.isValid(change.before.value, target)
+        val completedAfter = progressTracking.operator.isValid(change.after.value, target)
 
         // Check if completed
         if (!completedBefore && completedAfter) {

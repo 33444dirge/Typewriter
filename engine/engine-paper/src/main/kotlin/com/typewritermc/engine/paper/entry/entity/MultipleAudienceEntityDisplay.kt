@@ -2,11 +2,13 @@ package com.typewritermc.engine.paper.entry.entity
 
 import com.typewritermc.core.entries.Ref
 import com.typewritermc.core.utils.point.Position
+import com.typewritermc.core.utils.point.distanceSquared
 import com.typewritermc.engine.paper.entry.entries.*
 import com.typewritermc.engine.paper.utils.server
 import org.bukkit.entity.Player
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.reflect.KClass
 
 abstract class MultipleEntityDisplayBase(
@@ -28,12 +30,13 @@ abstract class MultipleEntityDisplayBase(
         val actualPlayer = player ?: server.getPlayer(playerId)
         ?: error("Player $playerId is not online when trying to find closest entity")
 
+        val viewerPosition = actualPlayer.viewerSnapshot?.position ?: return null
         val entityList = entities[playerId] ?: return null
 
         return entityList
             .mapNotNull { entity ->
                 val distSq =
-                    entity.activityManager.position.distanceSquared(actualPlayer.location) ?: return@mapNotNull null
+                    entity.activityManager.position.distanceSquared(viewerPosition) ?: return@mapNotNull null
                 entity to distSq
             }
             .minByOrNull { it.second }
@@ -44,9 +47,10 @@ abstract class MultipleEntityDisplayBase(
         val actualPlayer = player ?: server.getPlayer(playerId)
         ?: error("Player $playerId is not online when trying to find closest position")
 
+        val viewerPosition = actualPlayer.viewerSnapshot?.position ?: return null
         return managers(playerId)
             .mapNotNull { manager ->
-                val distSq = manager.position.distanceSquared(actualPlayer.location) ?: return@mapNotNull null
+                val distSq = manager.position.distanceSquared(viewerPosition) ?: return@mapNotNull null
                 manager.position.toPosition() to distSq
             }
             .minByOrNull { it.second }
@@ -105,22 +109,13 @@ abstract class MultipleEntityDisplayBase(
     }
 
     protected fun performTick() {
-        refreshPlayers()
-        updateVisibleEntities()
-        tickAllEntities()
+        forEachConsideredPlayer(::performPlayerTick)
     }
 
-    private fun refreshPlayers() {
-        consideredPlayers.forEach { it.refresh() }
-    }
-
-    private fun updateVisibleEntities() {
-        val showRanges = consideredPlayers.associateWith { showRangeSq(it) }
-
-        consideredPlayers.forEach { player ->
-            val rangeSq = showRanges[player] ?: return@forEach
-            syncPlayerEntities(player, rangeSq)
-        }
+    protected fun performPlayerTick(player: Player) {
+        player.refresh()
+        syncPlayerEntities(player, showRangeSq(player))
+        entities[player.uniqueId]?.forEach { it.tick() }
     }
 
     private fun syncPlayerEntities(player: Player, rangeSq: Double) {
@@ -169,10 +164,6 @@ abstract class MultipleEntityDisplayBase(
         }
     }
 
-    private fun tickAllEntities() {
-        entities.values.flatten().forEach { it.tick() }
-    }
-
     protected fun removePlayerEntities(
         player: Player,
         additionalCleanup: (DisplayEntity) -> Unit = {}
@@ -196,8 +187,8 @@ class MultipleSharedAudienceEntityDisplay(
     private val entityCount: Int,
 ) : MultipleEntityDisplayBase(instanceEntryRef, creator, suppliers) {
 
-    private var activityManagers: List<ActivityManager<in SharedActivityContext>> = emptyList()
-    private val lastStates = mutableListOf<EntityState>()
+    @Volatile private var activityManagers: List<ActivityManager<in SharedActivityContext>> = emptyList()
+    private val lastStates = CopyOnWriteArrayList<EntityState>()
 
     private fun viewersForManager(manager: ActivityManager<*>): List<Player> =
         entities.entries
@@ -363,7 +354,7 @@ class MultipleIndividualAudienceEntityDisplay(
         }
 
         activityManagers[player.uniqueId] = newManagers
-        lastStates[player.uniqueId] = MutableList(count) { EntityState() }
+        lastStates[player.uniqueId] = CopyOnWriteArrayList(List(count) { EntityState() })
 
         super.onPlayerAdd(player)
     }
@@ -394,10 +385,12 @@ class MultipleIndividualAudienceEntityDisplay(
     }
 
     override fun tick() {
-        consideredPlayers.forEach { it.refresh() }
-        adjustManagerCounts()
-        tickActivityManagers()
-        performTick()
+        forEachConsideredPlayer { player ->
+            adjustManagerCountForPlayer(player)
+            val managers = activityManagers[player.uniqueId] ?: return@forEachConsideredPlayer
+            tickManagersForPlayer(player, managers)
+            performPlayerTick(player)
+        }
     }
 
     private fun adjustManagerCounts() {
@@ -447,7 +440,7 @@ class MultipleIndividualAudienceEntityDisplay(
     }
 
     private fun adjustStatesForCount(playerId: UUID, targetCount: Int) {
-        val states = lastStates[playerId] ?: mutableListOf()
+        val states = lastStates[playerId] ?: CopyOnWriteArrayList()
         when {
             targetCount > states.size -> {
                 states.addAll(List(targetCount - states.size) { EntityState() })
@@ -551,13 +544,14 @@ class MultipleGroupAudienceEntityDisplay(
 
     private val activityManagers = ConcurrentHashMap<GroupId, List<ActivityManager<in SharedActivityContext>>>()
     private val lastStates = ConcurrentHashMap<GroupId, MutableList<EntityState>>()
+    private val memberships = ConcurrentHashMap<UUID, GroupId>()
 
     private fun groupViewers(groupId: GroupId): List<Player> {
-        return players.filter { group.groupId(it) == groupId }
+        return players.filter { memberships[it.uniqueId] == groupId }
     }
 
     private fun getGroupId(player: Player): GroupId {
-        return group.groupId(player) ?: GroupId(player.uniqueId)
+        return memberships[player.uniqueId] ?: GroupId(player.uniqueId)
     }
 
     private fun createSharedContext(groupId: GroupId, state: EntityState? = null): SharedActivityContext {
@@ -585,12 +579,23 @@ class MultipleGroupAudienceEntityDisplay(
     }
 
     override fun onEntityRemovedFromPlayer(manager: ActivityManager<*>, player: Player) {
-        val groupId = getGroupId(player)
-        manager.removedViewer(createSharedContext(groupId), player)
+        val viewers = players.filter { viewer ->
+            entities[viewer.uniqueId]?.any { it.activityManager === manager } == true
+        }
+        manager.removedViewer(SharedActivityContext(instanceEntryRef, viewers), player)
     }
 
     override fun filter(player: Player): Boolean {
-        val groupId = getGroupId(player)
+        val groupId = group.snapshotGroupId(player) ?: GroupId(player.uniqueId)
+        val previous = memberships.put(player.uniqueId, groupId)
+        if (previous != groupId) {
+            try {
+                removePlayerEntities(player)
+            } finally {
+                previous?.let(::releaseEmptyGroup)
+            }
+        }
+        ensureGroup(groupId)
         val managerList = activityManagers[groupId] ?: return false
         val showRangeSq = showRangeSq(player)
 
@@ -600,17 +605,17 @@ class MultipleGroupAudienceEntityDisplay(
     }
 
     override fun onPlayerAdd(player: Player) {
-        val groupId = getGroupId(player)
+        val groupId = group.snapshotGroupId(player) ?: GroupId(player.uniqueId)
+        memberships[player.uniqueId] = groupId
+        ensureGroup(groupId)
+        super.onPlayerAdd(player)
+    }
 
+    private fun ensureGroup(groupId: GroupId) {
         activityManagers.computeIfAbsent(groupId) {
+            lastStates[groupId] = CopyOnWriteArrayList(List(entityCount.coerceAtLeast(1)) { EntityState() })
             createManagersForGroup(groupId)
         }
-
-        lastStates.computeIfAbsent(groupId) {
-            MutableList(entityCount.coerceAtLeast(1)) { EntityState() }
-        }
-
-        super.onPlayerAdd(player)
     }
 
     private fun createManagersForGroup(groupId: GroupId): List<ActivityManager<in SharedActivityContext>> {
@@ -664,27 +669,29 @@ class MultipleGroupAudienceEntityDisplay(
     }
 
     override fun onPlayerFilterRemoved(player: Player) {
-        val groupId = getGroupId(player)
-        activityManagers[groupId]?.forEach { manager ->
-            onEntityRemovedFromPlayer(manager, player)
-        }
-
         super.onPlayerFilterRemoved(player)
-        entities.remove(player.uniqueId)?.forEach { it.dispose() }
+        removePlayerEntities(player)
     }
 
     override fun onPlayerRemove(player: Player) {
-        super.onPlayerRemove(player)
-        val groupId = getGroupId(player)
+        try {
+            super.onPlayerRemove(player)
+        } finally {
+            memberships.remove(player.uniqueId)?.let(::releaseEmptyGroup)
+        }
+    }
 
-        entities.remove(player.uniqueId)?.forEach { it.dispose() }
-
-        // When there is nobody that can view an entity, we no longer need to track its activity
-        if (consideredPlayers.none { getGroupId(it) == groupId }) {
-            activityManagers.remove(groupId)?.forEach { manager ->
-                manager.dispose(createSharedContext(groupId))
+    private fun releaseEmptyGroup(groupId: GroupId) {
+        var retired: List<ActivityManager<in SharedActivityContext>>? = null
+        activityManagers.computeIfPresent(groupId) { _, managers ->
+            if (memberships.containsValue(groupId)) managers else {
+                retired = managers
+                lastStates.remove(groupId)
+                null
             }
-            lastStates.remove(groupId)
+        }
+        retired?.let { managers ->
+            managers.forEach { it.dispose(SharedActivityContext(instanceEntryRef, emptyList())) }
         }
     }
 
@@ -702,6 +709,7 @@ class MultipleGroupAudienceEntityDisplay(
         }
         activityManagers.clear()
         lastStates.clear()
+        memberships.clear()
     }
 
     override fun position(playerId: UUID): Position? {

@@ -7,6 +7,8 @@ import com.typewritermc.engine.paper.extensions.placeholderapi.parsePlaceholders
 import com.typewritermc.engine.paper.interaction.Confirmation
 import com.typewritermc.engine.paper.interaction.awaitConfirmation
 import com.typewritermc.engine.paper.interaction.chatHistory
+import com.typewritermc.engine.paper.events.DialogueDisplayEvent
+import com.typewritermc.engine.paper.interaction.acceptActionBarMessage
 import com.typewritermc.engine.paper.snippets.snippet
 import com.typewritermc.engine.paper.utils.*
 import net.kyori.adventure.text.minimessage.tag.resolver.Placeholder
@@ -67,6 +69,20 @@ class JavaSpokenDialogueDialogueMessenger(player: Player, context: InteractionCo
     override fun tick(context: TickContext) {
         if (state != MessengerState.RUNNING) return
         playedTime += context.deltaTime
+        if (DialogueDisplayEvent.getHandlerList().registeredListeners.isNotEmpty()) {
+            val percentage = typingDurationType.calculatePercentage(playedTime, entry.duration.get(player), text.stripped())
+            val request = DialogueDisplayEvent(
+                player, entry.id, speakerDisplayName.asMini(player),
+                text.asMini(player).splitPercentage(percentage), emptyList(), -1, 0, 0,
+                "<confirmation_key>".asMini(player), animationComplete, eventTriggers.isEmpty(),
+            )
+            request.callEvent()
+            request.actionBarMessage?.let {
+                player.acceptActionBarMessage(it)
+                player.sendActionBar(it)
+            }
+            if (request.isCancelled) return
+        }
         player.sendSpokenDialogue(
             text,
             speakerDisplayName,

@@ -1,5 +1,7 @@
 package com.typewritermc.entity.entries.activity
 
+import com.typewritermc.engine.paper.entry.entity.viewerSnapshot
+
 import com.typewritermc.core.books.pages.Colors
 import com.typewritermc.core.entries.Ref
 import com.typewritermc.core.entries.emptyRef
@@ -96,7 +98,7 @@ class InDialogueActivity(
             context.instanceRef.get()?.definition.logErrorIfNull("Could not find definition, this should not happen. Please report this on the TypeWriter Discord!")
                 ?: return idleActivity
         val inDialogue = context.viewers.filter { viewer ->
-            viewer.speakersInDialogue.any {
+            viewer.viewerSnapshot?.speakers.orEmpty().any {
                 it == definition || it == context.instanceRef
             }
         }
@@ -108,7 +110,7 @@ class InDialogueActivity(
         }
 
         inDialogue.forEach { player ->
-            trackers.computeIfAbsent(player.uniqueId) { PlayerDialogueTracker(player.currentDialogue) }.update(player)
+            trackers.computeIfAbsent(player.uniqueId) { PlayerDialogueTracker(player.viewerSnapshot?.dialogue) }.update(player.viewerSnapshot?.dialogue)
         }
 
         val isTalking = trackers.any { (_, tracker) -> tracker.isActive(dialogueIdleDuration) }
@@ -181,8 +183,7 @@ class InDialogueActivity(
         var dialogue: DialogueEntry?,
         var lastInteraction: Long = System.currentTimeMillis()
     ) {
-        fun update(player: Player) {
-            val currentDialogue = player.currentDialogue
+        fun update(currentDialogue: DialogueEntry?) {
             if (dialogue?.id == currentDialogue?.id) return
             lastInteraction = System.currentTimeMillis()
             dialogue = currentDialogue

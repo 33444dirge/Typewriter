@@ -48,14 +48,14 @@ class RegionAudienceFilter(
     @EventHandler
     fun onRegionEnter(event: RegionsEnterEvent) {
         if (!canConsider(event.player)) return
-        if (event.regions.none { it.id == region }) return
+        if (region !in event) return
         event.player.updateFilter(true)
     }
 
     @EventHandler
     fun onRegionLeave(event: RegionsExitEvent) {
         if (!canConsider(event.player)) return
-        if (event.regions.none { it.id == region }) return
+        if (region !in event) return
         event.player.updateFilter(false)
     }
 

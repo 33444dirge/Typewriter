@@ -11,7 +11,7 @@ repositories {
     }
 }
 dependencies {
-    compileOnly("com.github.MilkBowl:VaultAPI:1.7.1")
+    compileOnly(files("../../compile-libs/VaultUnlocked-2.20.3.jar"))
 }
 
 typewriter {

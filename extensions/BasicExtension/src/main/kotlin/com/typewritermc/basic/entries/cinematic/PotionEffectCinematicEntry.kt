@@ -1,5 +1,7 @@
 package com.typewritermc.basic.entries.cinematic
 
+import com.typewritermc.engine.paper.utils.entityDispatcher
+
 import com.typewritermc.core.books.pages.Colors
 import com.typewritermc.core.extension.annotations.Default
 import com.typewritermc.core.extension.annotations.Entry
@@ -72,7 +74,7 @@ class PotionEffectCinematicAction(
         val potionEffectType = segment.potionEffectType.get(player, context)
         state = player.state(EffectStateProvider(potionEffectType))
 
-        Dispatchers.Sync.switchContext {
+        player.entityDispatcher.switchContext {
             player.addPotionEffect(
                 PotionEffect(
                     potionEffectType,
@@ -94,7 +96,7 @@ class PotionEffectCinematicAction(
     private suspend fun restoreState() {
         val state = state ?: return
         this.state = null
-        Dispatchers.Sync.switchContext {
+        player.entityDispatcher.switchContext {
             player.restore(state)
         }
     }

@@ -11,6 +11,9 @@ import com.typewritermc.roadnetwork.entries.*
 import com.typewritermc.roadnetwork.gps.GPSEdge
 import org.bukkit.entity.Player
 import java.time.Duration
+import com.typewritermc.core.utils.UntickedAsync
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 class PathFindingPathStreamProducer(
     player: Player,
@@ -43,9 +46,10 @@ class PathFindingPathStreamProducer(
     )
 
     override suspend fun refreshPath(): PathStream? {
-        val (start, end) = points() ?: return null
-        val edges = findEdges()
-        val visibleEdges = edges.filterVisible(start, end)
+        val visibleEdges = withContext(Dispatchers.UntickedAsync) {
+            val (start, end) = points() ?: return@withContext emptyList()
+            findEdges().filterVisible(start, end)
+        }
         if (visibleEdges.isEmpty()) return null
         return PathFindingPathStream(
             displaySupplier(player),
@@ -90,6 +94,7 @@ class PathFindingPathStream(
         val position = navigator.position().toPosition()
 
         if (!navigator.isComplete()) return position
+        navigator.dispose()
         currentEdgeIndex++
         if (!shouldContinue()) return position
         navigator = NavigationActivityTaskState.Walking(
@@ -106,8 +111,7 @@ class PathFindingPathStream(
         return currentEdgeIndex < edges.size
     }
 
-    override fun dispose() {
-        super.dispose()
+    override fun disposeResources() {
         navigator.dispose()
     }
 }

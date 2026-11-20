@@ -47,12 +47,15 @@ class FreezeTimeAudienceDisplay(
     private val time: Var<Long>,
 ) : AudienceDisplay(), TickableDisplay {
     private val interceptors = ConcurrentHashMap<UUID, InterceptionBundle>()
+    private val appliedTimes = ConcurrentHashMap<UUID, Long>()
 
     override fun onPlayerAdd(player: Player) {
-        interceptors[player.uniqueId] = player.interceptPackets {
+        val playerId = player.uniqueId
+        appliedTimes[playerId] = time.get(player)
+        interceptors[playerId] = player.interceptPackets {
             PacketType.Play.Server.TIME_UPDATE { event ->
                 val packet = WrapperPlayServerTimeUpdate(event)
-                packet.timeOfDay = time.get(player)
+                packet.timeOfDay = appliedTimes[playerId] ?: return@TIME_UPDATE
                 packet.isTickTime = false
             }
         }
@@ -60,14 +63,17 @@ class FreezeTimeAudienceDisplay(
     }
 
     override fun tick() {
-        players.forEach { player ->
-            player.setPlayerTime(time.get(player), false)
-            WrapperPlayServerTimeUpdate(player.world.gameTime, time.get(player), false).sendPacketTo(player)
+        forEachPlayer { player ->
+            val targetTime = time.get(player)
+            appliedTimes[player.uniqueId] = targetTime
+            player.setPlayerTime(targetTime, false)
+            WrapperPlayServerTimeUpdate(player.world.gameTime, targetTime, false).sendPacketTo(player)
         }
     }
 
     override fun onPlayerRemove(player: Player) {
         interceptors.remove(player.uniqueId)?.cancel()
+        appliedTimes.remove(player.uniqueId)
         player.resetPlayerTime()
         WrapperPlayServerTimeUpdate(player.world.gameTime, player.playerTime, false).sendPacketTo(player)
     }

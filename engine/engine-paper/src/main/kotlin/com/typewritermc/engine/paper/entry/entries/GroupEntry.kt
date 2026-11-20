@@ -3,6 +3,7 @@ package com.typewritermc.engine.paper.entry.entries
 import com.typewritermc.core.extension.annotations.Tags
 import com.typewritermc.engine.paper.entry.StaticEntry
 import com.typewritermc.engine.paper.utils.server
+import com.typewritermc.engine.paper.entry.entity.snapshotGroupId
 import org.bukkit.entity.Player
 import java.util.*
 
@@ -19,7 +20,7 @@ interface GroupEntry : StaticEntry {
      * Get the group for a given id
      */
     fun group(id: GroupId): Group {
-        return Group(server.onlinePlayers.filter { groupId(it) == id })
+        return Group(server.onlinePlayers.filter { snapshotGroupId(it) == id })
     }
 
     /**
@@ -27,7 +28,7 @@ interface GroupEntry : StaticEntry {
      * If the player is not part of any group, return null.
      */
     fun group(player: Player): Group? {
-        val id = groupId(player) ?: return null
+        val id = snapshotGroupId(player) ?: return null
         return group(id)
     }
 }

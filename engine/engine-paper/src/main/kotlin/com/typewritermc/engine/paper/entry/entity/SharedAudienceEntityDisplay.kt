@@ -28,7 +28,7 @@ class SharedAudienceEntityDisplay(
      * When nobody can see the entity, but it is still active, there is no way to get the state for the entity.
      * So we just assume that the entity state stays the same.
      */
-    private var lastState: EntityState = EntityState()
+    @Volatile private var lastState: EntityState = EntityState()
 
     override fun filter(player: Player): Boolean {
         val npcLocation = activityManager?.position ?: return false

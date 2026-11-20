@@ -9,7 +9,7 @@ import com.typewritermc.engine.paper.entry.entity.*
 import com.typewritermc.engine.paper.entry.entries.EntityActivityEntry
 import com.typewritermc.engine.paper.entry.entries.EntityProperty
 import com.typewritermc.engine.paper.entry.entries.GenericEntityActivityEntry
-import com.typewritermc.engine.paper.utils.firstWalkableLocationBelow
+import com.typewritermc.engine.paper.utils.firstWalkableLocationBelowAsync
 import com.typewritermc.roadnetwork.*
 import com.typewritermc.roadnetwork.gps.PointToPointGPS
 import org.koin.java.KoinJavaComponent
@@ -68,7 +68,7 @@ private class PathActivity(
                 roadNetwork,
                 {
                     val position = currentPosition.toPosition()
-                    position.firstWalkableLocationBelow() ?: position
+                    position.firstWalkableLocationBelowAsync() ?: position
                 }) {
                 targetNode.position
             },

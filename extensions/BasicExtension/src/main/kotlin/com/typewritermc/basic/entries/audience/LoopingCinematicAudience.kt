@@ -11,6 +11,7 @@ import com.typewritermc.engine.paper.entry.entries.*
 import com.typewritermc.engine.paper.entry.matches
 import com.typewritermc.engine.paper.logger
 import com.typewritermc.engine.paper.utils.toTicks
+import com.typewritermc.engine.paper.utils.entityDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import org.bukkit.entity.Player
@@ -67,7 +68,7 @@ private class LoopingCinematicAudienceDisplay(
     private val tracked = ConcurrentHashMap<UUID, LoopingCinematicPlayerDisplay>()
 
     override fun tick() {
-        tracked.values.forEach { it.tick() }
+        forEachPlayer { tracked[it.uniqueId]?.tick() }
     }
 
     override fun onPlayerAdd(player: Player) {
@@ -87,7 +88,7 @@ private class LoopingCinematicPlayerDisplay(
 
     private fun setupDisplay(after: Job? = null): CinematicDisplay {
         val actions = loopingEntries.filter { it.criteria.matches(player) }.map { it.create(player) }
-        return CinematicDisplay(actions).also { it.setup(after) }
+        return CinematicDisplay(player, actions).also { it.setup(after) }
     }
 
     fun tick() {
@@ -105,6 +106,7 @@ private class LoopingCinematicPlayerDisplay(
 }
 
 private class CinematicDisplay(
+    private val player: Player,
     private val actions: List<CinematicAction>,
 ) {
     private var startTime: Instant? = null
@@ -112,6 +114,7 @@ private class CinematicDisplay(
     // Setting up and tearing down run off the ticking thread, so they are chained to keep a teardown
     // from overtaking the setup it is meant to undo.
     private var lifecycle: Job? = null
+    private var tickJob: Job? = null
 
     val frame: Int
         get() = if (startTime != null) Duration.between(startTime, Instant.now()).toTicks().toInt() else 0
@@ -120,7 +123,7 @@ private class CinematicDisplay(
         get() = actions.all { it canFinish frame }
 
     fun setup(after: Job? = null) {
-        lifecycle = Dispatchers.UntickedAsync.launch {
+        lifecycle = player.entityDispatcher.launch {
             after?.join()
             actions.forEach { it.setup() }
             startTime = Instant.now()
@@ -128,9 +131,9 @@ private class CinematicDisplay(
     }
 
     fun tick() {
-        if (startTime == null) return
+        if (startTime == null || tickJob?.isActive == true) return
         val frame = frame
-        Dispatchers.UntickedAsync.launch {
+        tickJob = player.entityDispatcher.launch {
             actions.forEach { it.tick(frame) }
         }
     }
@@ -138,8 +141,10 @@ private class CinematicDisplay(
     /** @return the job that completes once every action has been torn down. */
     fun teardown(): Job {
         startTime = null
+        tickJob?.cancel()
+        tickJob = null
         val previous = lifecycle
-        val job = Dispatchers.UntickedAsync.launch {
+        val job = player.entityDispatcher.launch {
             previous?.join()
             actions.forEach { it.teardown() }
         }

@@ -54,16 +54,16 @@ class IndividualAudienceEntityDisplay(
     }
 
     override fun tick() {
-        consideredPlayers.forEach { it.refresh() }
-
-        activityManagers.forEach { (pid, manager) ->
-            val player = server.getPlayer(pid) ?: return@forEach
+        forEachConsideredPlayer { player ->
+            player.refresh()
+            val pid = player.uniqueId
+            val manager = activityManagers[pid] ?: return@forEachConsideredPlayer
             val isViewing = pid in this
             val entityState =
                 entities[pid]?.state?.also { lastStates[pid] = it } ?: lastStates.getOrPut(pid) { EntityState() }
             manager.tick(IndividualActivityContext(instanceEntryRef, player, isViewing, entityState))
+            entities[pid]?.tick()
         }
-        entities.values.forEach { it.tick() }
     }
 
     override fun onPlayerFilterRemoved(player: Player) {

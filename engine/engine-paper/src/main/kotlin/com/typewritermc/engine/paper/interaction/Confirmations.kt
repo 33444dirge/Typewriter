@@ -1,6 +1,13 @@
 package com.typewritermc.engine.paper.interaction
 
 import org.bukkit.entity.Player
+import org.bukkit.event.EventHandler
+import org.bukkit.event.EventPriority
+import org.bukkit.event.HandlerList
+import org.bukkit.event.Listener
+import org.bukkit.event.player.PlayerQuitEvent
+import com.typewritermc.engine.paper.plugin
+import com.typewritermc.engine.paper.logger
 import org.koin.java.KoinJavaComponent.get
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
@@ -15,9 +22,38 @@ import java.util.concurrent.atomic.AtomicReference
  * of key is made in one place. Anything that takes a player's input away registers what is left of it
  * with [takeOver], so that choice can account for it.
  */
-class Confirmations {
+class Confirmations : Listener {
     private val inputs = ConcurrentHashMap<UUID, CopyOnWriteArrayList<ConfirmationInput>>()
     private val open = ConcurrentHashMap<UUID, CopyOnWriteArrayList<OpenConfirmation>>()
+
+    fun initialize() {
+        plugin.server.pluginManager.registerEvents(this, plugin)
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    fun onQuit(event: PlayerQuitEvent) = clear(event.player.uniqueId)
+
+    fun clear(playerId: UUID) {
+        val confirmations = open.remove(playerId)?.toList().orEmpty()
+        inputs.remove(playerId)
+        confirmations.forEach {
+            try {
+                it.dispose()
+            } catch (error: Exception) {
+                logger.log(java.util.logging.Level.WARNING, "Failed to release a confirmation input", error)
+            }
+        }
+    }
+
+    fun clear() {
+        open.keys.toList().forEach(::clear)
+        inputs.clear()
+    }
+
+    fun shutdown() {
+        clear()
+        HandlerList.unregisterAll(this)
+    }
 
     /**
      * Registers [input] as what can be picked up from [player], until the registration is disposed.
@@ -101,7 +137,7 @@ interface Confirmation : ConfirmationRegistration {
 
 private class OpenConfirmation(
     private val preferred: ConfirmationKey?,
-    override var key: ConfirmationKey,
+    @Volatile override var key: ConfirmationKey,
     private val siblings: List<OpenConfirmation>,
     private val onConfirm: () -> Unit,
     private val onDispose: (OpenConfirmation) -> Unit,
@@ -126,7 +162,7 @@ private class OpenConfirmation(
     }
 
     private fun onPress() {
-        if (siblings.lastOrNull() !== this) return
+        if (isDisposed || siblings.lastOrNull() !== this) return
         onConfirm()
     }
 
@@ -135,7 +171,7 @@ private class OpenConfirmation(
     }
 
     override fun dispose() {
-        disposed.set(true)
+        if (!disposed.compareAndSet(false, true)) return
         stopListening()
         onDispose(this)
     }

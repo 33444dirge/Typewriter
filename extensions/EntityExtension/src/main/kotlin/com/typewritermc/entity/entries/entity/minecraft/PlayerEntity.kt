@@ -25,6 +25,7 @@ import com.typewritermc.entity.entries.data.minecraft.PoseProperty
 import com.typewritermc.entity.entries.data.minecraft.applyGenericEntityData
 import com.typewritermc.entity.entries.data.minecraft.living.applyLivingEntityData
 import com.typewritermc.entity.entries.entity.RideableSittingSupport
+import com.typewritermc.entity.entries.entity.releaseWithoutViewer
 import com.typewritermc.entity.entries.entity.custom.state
 import me.tofaa.entitylib.EntityLib
 import me.tofaa.entitylib.meta.types.PlayerMeta
@@ -204,7 +205,14 @@ class PlayerEntity(
         entity.remove()
         // EntityLib adds the profile to the client's player list on spawn and never takes it back out.
         WrapperPlayServerPlayerInfoRemove(entity.uuid) sendPacketTo player
+        retireResources()
+    }
+
+    override fun retireResources() {
+        rideableSitting.retireResources()
+        entity.releaseWithoutViewer()
         claimedProfiles -= entity.uuid
+        super.retireResources()
     }
 
     companion object {

@@ -36,13 +36,7 @@ class MobCountFact(
         val mob = MythicBukkit.inst().mobManager.getMythicMob(mobName)
         if (!mob.isPresent) return FactData(0)
 
-        var count = 0
-        for (activeMob in MythicBukkit.inst().mobManager.activeMobs) {
-            if (activeMob.type == mob.get()) {
-                count++
-            }
-        }
-
-        return FactData(count)
+        val type = mob.get().internalName
+        return FactData(MythicBukkit.inst().mobManager.activeMobs.count { it.mobType == type })
     }
 }

@@ -16,6 +16,10 @@ import com.typewritermc.engine.paper.plugin
 import com.typewritermc.engine.paper.utils.get
 import org.koin.core.component.KoinComponent
 import java.lang.reflect.Type
+import java.io.File
+import java.nio.file.Files
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.StandardCopyOption.*
 import java.time.LocalDateTime
 import java.time.ZoneOffset
 import java.util.*
@@ -34,8 +38,16 @@ class FileFactStorage : FactStorage, KoinComponent {
         }
     }
 
-    override suspend fun loadFacts(): Map<FactId, FactData> {
-        val file = plugin.dataFolder["facts.json"]
+    override suspend fun loadFacts(): Map<FactId, FactData> = withContext(Dispatchers.IO) {
+        readFactFile(plugin.dataFolder["facts.json"])
+    }
+
+    override suspend fun storeFacts(facts: Collection<Pair<FactId, FactData>>) = withContext(Dispatchers.IO) {
+        writeFactFile(plugin.dataFolder["facts.json"], facts)
+    }
+}
+
+internal fun readFactFile(file: File): Map<FactId, FactData> {
         if (!file.exists()) {
             return emptyMap()
         }
@@ -63,27 +75,33 @@ class FileFactStorage : FactStorage, KoinComponent {
         return facts
     }
 
-    override suspend fun storeFacts(facts: Collection<Pair<FactId, FactData>>) {
-        val file = plugin.dataFolder["facts.json"]
-        if (!file.exists()) {
-            withContext(Dispatchers.IO) {
-                file.createNewFile()
-            }
-        }
-
-        file.writer().buffered().use { fileWriter ->
+internal fun writeFactFile(file: File, facts: Collection<Pair<FactId, FactData>>) {
+    val target = file.toPath()
+    Files.createDirectories(target.toAbsolutePath().parent)
+    val temporary = Files.createTempFile(target.toAbsolutePath().parent, "facts-", ".tmp")
+    try {
+        Files.newBufferedWriter(temporary).use { fileWriter ->
             JsonWriter(fileWriter).use { writer ->
                 writer.beginObject()
-                for ((id, data) in facts) {
-                    writer.name(id.entryId)
+                for ((entryId, groupFacts) in facts.groupBy { it.first.entryId }) {
+                    writer.name(entryId)
                     writer.beginObject()
-                    writer.name(id.groupId.id)
-                    gson.toJson(data, FactData::class.java, writer)
+                    for ((id, data) in groupFacts) {
+                        writer.name(id.groupId.id)
+                        gson.toJson(data, FactData::class.java, writer)
+                    }
                     writer.endObject()
                 }
                 writer.endObject()
             }
         }
+        try {
+            Files.move(temporary, target, ATOMIC_MOVE, REPLACE_EXISTING)
+        } catch (_: AtomicMoveNotSupportedException) {
+            Files.move(temporary, target, REPLACE_EXISTING)
+        }
+    } finally {
+        Files.deleteIfExists(temporary)
     }
 }
 

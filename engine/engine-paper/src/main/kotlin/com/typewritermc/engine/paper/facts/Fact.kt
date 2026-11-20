@@ -5,6 +5,8 @@ import java.time.LocalDateTime
 
 data class FactData(val value: Int, val lastUpdate: LocalDateTime = LocalDateTime.now())
 
+data class FactChange(val before: FactData, val after: FactData)
+
 data class FactId(
     val entryId: String,
     val groupId: GroupId,

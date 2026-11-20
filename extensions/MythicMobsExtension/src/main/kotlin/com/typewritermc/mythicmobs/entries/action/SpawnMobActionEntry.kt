@@ -16,12 +16,14 @@ import com.typewritermc.engine.paper.entry.entries.ConstVar
 import com.typewritermc.engine.paper.entry.entries.Var
 import com.typewritermc.engine.paper.extensions.placeholderapi.parsePlaceholders
 import com.typewritermc.engine.paper.plugin
-import com.typewritermc.engine.paper.utils.Sync
+import com.typewritermc.engine.paper.utils.entityDispatcher
+import com.typewritermc.engine.paper.utils.foliaScheduler
+import com.typewritermc.engine.paper.utils.regionDispatcher
 import com.typewritermc.engine.paper.utils.toBukkitLocation
 import io.lumine.mythic.api.mobs.entities.SpawnReason
 import io.lumine.mythic.bukkit.BukkitAdapter
 import io.lumine.mythic.bukkit.MythicBukkit
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 
 @Entry("spawn_mythicmobs_mob", "Spawn a mob from MythicMobs", Colors.ORANGE, "fa6-solid:dragon")
@@ -46,18 +48,17 @@ class SpawnMobActionEntry(
     private var spawnLocation: Var<Position> = ConstVar(Position.ORIGIN),
 ) : ActionEntry {
     override fun ActionTrigger.execute() {
-        val mob = MythicBukkit.inst().mobManager.getMythicMob(mobName.get(player, context).parsePlaceholders(player))
-        if (!mob.isPresent) return
-
-        Dispatchers.Sync.launch {
-            mob.get().spawn(
-                BukkitAdapter.adapt(spawnLocation.get(player, context).toBukkitLocation()),
-                level.get(player, context),
-                SpawnReason.OTHER
-            ) {
-                if (onlyVisibleForPlayer) {
-                    it.isVisibleByDefault = false
-                    player.showEntity(plugin, it)
+        player.entityDispatcher.launch {
+            val mob = MythicBukkit.inst().mobManager
+                .getMythicMob(mobName.get(player, context).parsePlaceholders(player)).orElse(null) ?: return@launch
+            val target = spawnLocation.get(player, context).toBukkitLocation()
+            val mobLevel = level.get(player, context)
+            withContext(target.regionDispatcher) {
+                mob.spawn(BukkitAdapter.adapt(target), mobLevel, SpawnReason.OTHER) { entity ->
+                    if (onlyVisibleForPlayer) {
+                        entity.isVisibleByDefault = false
+                        foliaScheduler.atEntity(player, { player.showEntity(plugin, entity) }, null, 1L)
+                    }
                 }
             }
         }

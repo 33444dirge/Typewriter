@@ -6,22 +6,24 @@ import com.typewritermc.core.extension.annotations.Placeholder
 import com.typewritermc.core.extension.annotations.Segments
 import com.typewritermc.core.extension.annotations.WithRotation
 import com.typewritermc.core.utils.point.Position
-import com.typewritermc.core.utils.switchContext
 import com.typewritermc.engine.paper.entry.Criteria
 import com.typewritermc.engine.paper.entry.entries.*
 import com.typewritermc.engine.paper.entry.temporal.SimpleCinematicAction
 import com.typewritermc.engine.paper.extensions.placeholderapi.parsePlaceholders
-import com.typewritermc.engine.paper.utils.Sync
-import com.typewritermc.engine.paper.utils.server
+import com.typewritermc.engine.paper.plugin
+import com.typewritermc.engine.paper.utils.entityDispatcher
+import com.typewritermc.engine.paper.utils.foliaScheduler
+import com.typewritermc.engine.paper.utils.regionDispatcher
 import com.typewritermc.engine.paper.utils.toBukkitLocation
-import io.lumine.mythic.api.mobs.GenericCaster
+import io.lumine.mythic.api.mobs.entities.SpawnReason
 import io.lumine.mythic.bukkit.BukkitAdapter
 import io.lumine.mythic.bukkit.MythicBukkit
 import io.lumine.mythic.core.mobs.ActiveMob
-import io.lumine.mythic.core.skills.SkillMetadataImpl
-import io.lumine.mythic.core.skills.SkillTriggers
-import kotlinx.coroutines.Dispatchers
+import com.typewritermc.mythicmobs.removeOnOwner
+import kotlinx.coroutines.withContext
 import org.bukkit.entity.Player
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 @Entry("mythicmob_cinematic", "Spawn a MythicMob during a cinematic", Colors.PURPLE, "fa6-solid:dragon")
 /**
@@ -58,43 +60,55 @@ class MobCinematicAction(
 ) : SimpleCinematicAction<MythicMobSegment>() {
     override val segments: List<MythicMobSegment> = entry.segments
 
-    private var mob: ActiveMob? = null
+    private var currentSpawn: Spawn? = null
+
+    private class Spawn {
+        val active = AtomicBoolean(true)
+        val mob = AtomicReference<ActiveMob?>()
+
+        fun close() {
+            active.set(false)
+            mob.getAndSet(null)?.removeOnOwner(despawn = true)
+        }
+    }
 
     override suspend fun startSegment(segment: MythicMobSegment) {
         super.startSegment(segment)
 
-        Dispatchers.Sync.switchContext {
-            val mob =
-                MythicBukkit.inst().mobManager.spawnMob(
-                    segment.mobName.get(player).parsePlaceholders(player),
-                    segment.location.get(player).toBukkitLocation()
-                )
-            this@MobCinematicAction.mob = mob
-            val hideMechanic = MythicBukkit.inst().skillManager.getMechanic("hide")
-
-            val targets =
-                server.onlinePlayers.filter { it.uniqueId != player.uniqueId }.map { BukkitAdapter.adapt(it) }.toSet()
-
-            val skillMeta = SkillMetadataImpl(
-                SkillTriggers.API,
-                GenericCaster(mob.entity),
-                mob.entity,
-                mob.location,
-                targets,
-                null,
-                1f
-            )
-
-            hideMechanic.execute(skillMeta)
+        val spawn = Spawn()
+        currentSpawn = spawn
+        try {
+            val (type, target) = withContext(player.entityDispatcher) {
+                val type = MythicBukkit.inst().mobManager
+                    .getMythicMob(segment.mobName.get(player).parsePlaceholders(player)).orElse(null)
+                type to segment.location.get(player).toBukkitLocation()
+            }
+            if (type == null) return
+            withContext(target.regionDispatcher) {
+                if (!spawn.active.get()) return@withContext
+                val mob = type.spawn(BukkitAdapter.adapt(target), 1.0, SpawnReason.OTHER) {
+                    it.isVisibleByDefault = false
+                } ?: return@withContext
+                spawn.mob.set(mob)
+                if (!spawn.active.get()) {
+                    spawn.close()
+                    return@withContext
+                }
+                val entity = mob.cachedEntity?.bukkitEntity ?: return@withContext
+                foliaScheduler.atEntity(player, {
+                    if (spawn.active.get() && spawn.mob.get() === mob) player.showEntity(plugin, entity)
+                }, null, 1L)
+            }
+        } catch (error: Throwable) {
+            spawn.close()
+            throw error
         }
     }
 
     override suspend fun stopSegment(segment: MythicMobSegment) {
         super.stopSegment(segment)
 
-        mob?.let {
-            it.despawn()
-            mob = null
-        }
+        currentSpawn?.close()
+        currentSpawn = null
     }
 }

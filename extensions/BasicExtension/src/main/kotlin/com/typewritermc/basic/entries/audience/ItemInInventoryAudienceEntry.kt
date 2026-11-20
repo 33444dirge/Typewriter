@@ -44,6 +44,6 @@ class ItemInInventoryAudienceFilter(
     }
 
     override fun tick() {
-        consideredPlayers.forEach { it.refresh() }
+        forEachConsideredPlayer { it.refresh() }
     }
 }

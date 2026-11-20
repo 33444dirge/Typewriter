@@ -1,5 +1,7 @@
 package com.typewritermc.basic.entries.action
 
+import com.typewritermc.engine.paper.utils.entityDispatcher
+
 import com.typewritermc.core.books.pages.Colors
 import com.typewritermc.core.entries.Ref
 import com.typewritermc.core.extension.annotations.Entry
@@ -50,7 +52,7 @@ class PlayerCommandActionEntry(
         val command = command.get(player, context)
         // Run in main thread
         if (command.isBlank()) return
-        Dispatchers.Sync.launch {
+        player.entityDispatcher.launch {
             val attachment = if (sudo) {
                 player.addAttachment(plugin)
             } else null

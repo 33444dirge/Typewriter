@@ -16,6 +16,7 @@ import com.typewritermc.engine.paper.entry.StagingManager
 import com.typewritermc.engine.paper.entry.triggerFor
 import com.typewritermc.engine.paper.logger
 import com.typewritermc.engine.paper.utils.Sync
+import com.typewritermc.engine.paper.utils.foliaScheduler
 import com.typewritermc.engine.paper.utils.server
 import com.typewritermc.loader.ExtensionLoader
 import kotlinx.coroutines.Dispatchers
@@ -41,9 +42,9 @@ class ClientSynchronizer : KoinComponent {
             ack.sendAckData(array.toString())
         } else if (data == "extensions") {
             ack.sendAckData(extensionJson.toString())
+        } else {
+            ack.sendAckData("No data found")
         }
-
-        ack.sendAckData("No data found")
     }
 
     fun handleCreatePage(client: SocketIOClient, data: String, ack: AckRequest) {
@@ -176,6 +177,14 @@ class ClientSynchronizer : KoinComponent {
             return
         }
 
+        foliaScheduler.atEntity(player, {
+            enterContentMode(player, request, ack)
+        }, {
+            ack.sendResult(Result.failure(Exception("Player disconnected before content mode started")))
+        }, 1L)
+    }
+
+    private fun enterContentMode(player: Player, request: ContentModeRequest, ack: AckRequest) {
         val context = ContentContext(request.data)
         try {
             val clazz = extensionLoader.loadClass(request.contentModeClassName)
@@ -188,6 +197,7 @@ class ClientSynchronizer : KoinComponent {
             }
 
             ContentModeTrigger(context, mode).triggerFor(player, context())
+            ack.sendResult(Result.success("Content mode request accepted"))
         } catch (e: ClassNotFoundException) {
             ack.sendResult(Result.failure(Exception("Could not find content mode class ${request.contentModeClassName}")))
             e.printStackTrace()
@@ -196,6 +206,9 @@ class ClientSynchronizer : KoinComponent {
             ack.sendResult(Result.failure(Exception("Could not find constructor (ContentContext, Player) for content mode class ${request.contentModeClassName}")))
             e.printStackTrace()
             return
+        } catch (e: Exception) {
+            ack.sendResult(Result.failure(Exception("Could not initialize content mode", e)))
+            logger.log(java.util.logging.Level.WARNING, "Content mode initialization failed", e)
         }
     }
 

@@ -16,16 +16,25 @@ import com.typewritermc.roadnetwork.gps.findPathBetweenPosition
 import com.typewritermc.roadnetwork.pathfinding.pathetic.PathCalculationResult
 import de.bsommerfeld.pathetic.api.pathing.result.Path
 import de.bsommerfeld.pathetic.api.wrapper.PathPosition
-import de.bsommerfeld.pathetic.bukkit.mapper.BukkitMapper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import org.bukkit.World
-import org.bukkit.block.Block
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import java.util.concurrent.atomic.AtomicLong
 import org.bukkit.util.BoundingBox
 import kotlin.math.*
 
 
 private const val MAX_RESUME_DISTANCE_SQUARED = 1.0
+
+private val navigationSnapshotLimit by config(
+    "entity.navigation.snapshot-limit", 16384, "每个行走 NPC 的碰撞快照方块上限（64–1048576）。",
+)
+private val navigationSnapshotRefreshTicks by config(
+    "entity.navigation.snapshot-refresh-ticks", 20, "碰撞快照刷新间隔，单位为行走帧（1–200）；较小值增加采集开销。",
+)
 
 class NavigationActivity(
     private val gps: GPS,
@@ -71,6 +80,7 @@ class NavigationActivity(
 
             val currentEdge = remaining.firstOrNull() ?: return TickResult.IGNORED
 
+            state.dispose()
             state = travelState(context, currentEdge, currentPosition)
         }
 
@@ -81,6 +91,7 @@ class NavigationActivity(
         val viewChanged = (state is NavigationActivityTaskState.FakeNavigation && context.isViewed)
                 || (state is NavigationActivityTaskState.Walking && !context.isViewed)
         if (edge != null && viewChanged) {
+            state.dispose()
             this.state = travelState(context, edge, currentPosition)
         }
 
@@ -135,9 +146,11 @@ sealed interface NavigationActivityTaskState {
         private val gps: GPS,
         private val position: PositionProperty,
     ) : NavigationActivityTaskState {
+        @Volatile
         var path: List<GPSEdge>? = null
         private val job: Job = Dispatchers.UntickedAsync.launch {
             val result = gps.findPath()
+            currentCoroutineContext().ensureActive()
             path = if (result.isFailure) {
                 logger.severe("Failed to find path: ${result.exceptionOrNull()}")
                 emptyList()
@@ -177,7 +190,6 @@ sealed interface NavigationActivityTaskState {
         }
 
         override fun tick(context: ActivityContext) {
-            super.tick(context)
             ticks++
         }
 
@@ -215,6 +227,11 @@ sealed interface NavigationActivityTaskState {
         }
 
         private var location: PositionProperty = startPosition
+        @Volatile private var publishedPosition: PositionProperty = startPosition
+        @Volatile private var publishedComplete = false
+        private val generation = AtomicLong()
+        private lateinit var blockView: BlockView
+        private class MissingBlocks : RuntimeException(null, null, false, false)
         private var velocity = Vector.ZERO
 
         private var yawVelocity = Velocity(0f)
@@ -244,50 +261,119 @@ sealed interface NavigationActivityTaskState {
 
         private var lastPhysicsResult: PhysicsResult? = null
 
-        private fun startPathCalculation() {
+        private suspend fun calculatePath() {
             // TODO: Pathing capabilities should be generated from the entity type
             //       but it would require the roadnetwork extension to have node with capabilities
             capabilities = EntityPathingCapabilities.DEFAULT
             blockCollision = BlockCollision(capabilities.maxStepHeight)
 
-            pathCalculationJob = Dispatchers.UntickedAsync.launch {
-                val entityPosition = location.toPosition()
-                val result = findPathBetweenPosition(
-                    startPosition = entityPosition.firstWalkableLocationBelow() ?: entityPosition,
-                    endPosition = edge.end,
-                    capabilities = capabilities,
-                    roadNetworkRef = roadNetwork,
-                    checkIntermediateNodes = false,
-                    allowFallback = true,
-                )
+            val entityPosition = location.toPosition()
+            val result = findPathBetweenPosition(
+                startPosition = entityPosition.firstWalkableLocationBelowAsync() ?: entityPosition,
+                endPosition = edge.end,
+                capabilities = capabilities,
+                roadNetworkRef = roadNetwork,
+                checkIntermediateNodes = false,
+                allowFallback = true,
+            )
 
-                when (result) {
-                    is PathCalculationResult.Success -> {
-                        patheticPath = result.path
-                        pathIndex = 0
-                        pathIsFallback = result.isFallback
-                    }
+            when (result) {
+                is PathCalculationResult.Success -> {
+                    patheticPath = result.path
+                    pathIndex = 0
+                    pathIsFallback = result.isFallback
+                }
 
-                    is PathCalculationResult.Failure -> {
-                        patheticPath = null
-                        pathCalculationFailed = true
-                        logger.warning("Failed to calculate path for edge ending at ${edge.end} starting from ${location.toPosition()}. Try to recalculate the road network edges.")
-                    }
+                is PathCalculationResult.Failure -> {
+                    patheticPath = null
+                    pathCalculationFailed = true
+                    logger.warning("Failed to calculate path for edge ending at ${edge.end} starting from ${location.toPosition()}. Try to recalculate the road network edges.")
                 }
             }
         }
 
-        override fun position(): PositionProperty = location
+        override fun position(): PositionProperty = publishedPosition
 
         override fun tick(context: ActivityContext) {
-            // A pause cancels the calculation but leaves the path it produced, which is still the
-            // path to this edge, so only an edge without one has to calculate.
-            if (pathCalculationJob == null && patheticPath == null) {
-                startPathCalculation()
+            if (publishedComplete || pathCalculationFailed) return
+            val previous = pathCalculationJob
+            if (previous != null && !previous.isCompleted) return
+            val epoch = generation.incrementAndGet()
+            pathCalculationJob = Dispatchers.UntickedAsync.launch {
+                try {
+                    if (patheticPath == null) calculatePath()
+                    if (pathCalculationFailed) return@launch
+                    lastPhysicsResult = null
+                    var snapshots = BlockSnapshots.create(location.toBukkitLocation(), navigationSnapshotLimit)
+                    var frames = 0
+                    while (generation.get() == epoch) {
+                        currentCoroutineContext().ensureActive()
+                        val checkpoint = checkpoint()
+                        blockView = BlockView { x, y, z ->
+                            val block = snapshots.getBlockAt(x, y, z)
+                            if (snapshots.hasMissing) throw MissingBlocks()
+                            block
+                        }
+                        val started = System.currentTimeMillis()
+                        try {
+                            step()
+                            val completed = reachedEnd()
+                            currentCoroutineContext().ensureActive()
+                            synchronized(generation) {
+                                if (generation.get() == epoch) {
+                                    publishedPosition = location
+                                    publishedComplete = completed
+                                }
+                            }
+                            if (completed) return@launch
+                        } catch (_: MissingBlocks) {
+                            restore(checkpoint)
+                            snapshots.loadMissing()
+                            continue
+                        }
+                        if (++frames >= navigationSnapshotRefreshTicks.coerceIn(1, 200)) {
+                            frames = 0
+                            snapshots = BlockSnapshots.create(location.toBukkitLocation(), navigationSnapshotLimit)
+                            lastPhysicsResult = null
+                        }
+                        delay((50L - (System.currentTimeMillis() - started)).coerceAtLeast(1L))
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    if (generation.get() == epoch) {
+                        pathCalculationFailed = true
+                        logger.log(java.util.logging.Level.WARNING, "NPC navigation failed at $publishedPosition", error)
+                    }
+                } finally {
+                    blockView = BlockView { _, _, _ -> throw MissingBlocks() }
+                }
             }
+        }
 
+        private data class Checkpoint(
+            val location: PositionProperty, val velocity: Vector, val yaw: Float, val pitch: Float,
+            val index: Int, val lastPosition: PositionProperty, val stuckTicks: Int, val physics: PhysicsResult?,
+        )
+
+        private fun checkpoint() = Checkpoint(
+            location, velocity, yawVelocity.value, pitchVelocity.value, pathIndex, lastPosition, stuckTicks, lastPhysicsResult,
+        )
+
+        private fun restore(checkpoint: Checkpoint) {
+            location = checkpoint.location
+            velocity = checkpoint.velocity
+            yawVelocity.value = checkpoint.yaw
+            pitchVelocity.value = checkpoint.pitch
+            pathIndex = checkpoint.index
+            lastPosition = checkpoint.lastPosition
+            stuckTicks = checkpoint.stuckTicks
+            lastPhysicsResult = checkpoint.physics
+        }
+
+        private fun step() {
             val currentPath = patheticPath ?: return
-            val world = location.world.toBukkitWorld()
+            val world = blockView
             val edgeEndSurfaceY = computeSurfaceY(
                 world, edge.end.blockX, edge.end.blockY, edge.end.blockZ
             )
@@ -318,16 +404,14 @@ sealed interface NavigationActivityTaskState {
                     return
                 }
                 moveTo(target)
-                super.tick(context)
                 return
             }
 
             val targetNode = currentPath.elementAtOrNull(pathIndex) ?: return
             moveTo(nodeTarget(targetNode, world))
-            super.tick(context)
         }
 
-        private fun advancePastReachedNodes(currentPath: Path, world: World) {
+        private fun advancePastReachedNodes(currentPath: Path, world: BlockView) {
             if (!isOnGround()) return
             while (pathIndex < currentPath.length()) {
                 val node = currentPath.elementAtOrNull(pathIndex) ?: return
@@ -347,8 +431,8 @@ sealed interface NavigationActivityTaskState {
             }
         }
 
-        private fun nodeTarget(node: PathPosition, world: World): PositionProperty {
-            val bukkitLocation = BukkitMapper.toLocation(node, world)
+        private fun nodeTarget(node: PathPosition, world: BlockView): PositionProperty {
+            val bukkitLocation = org.bukkit.Location(null, node.x, node.y, node.z)
             val centered = bukkitLocation.toCenterLocation()
             val surfaceY = computeSurfaceY(
                 world, bukkitLocation.blockX, bukkitLocation.blockY, bukkitLocation.blockZ
@@ -412,9 +496,9 @@ sealed interface NavigationActivityTaskState {
                 return
             }
 
-            val nextLocation = BukkitMapper.toLocation(nextNode, location.world.toBukkitWorld())
+            val nextLocation = org.bukkit.Location(null, nextNode.x, nextNode.y, nextNode.z)
             val nextSurfaceY = computeSurfaceY(
-                location.world.toBukkitWorld(),
+                blockView,
                 nextLocation.blockX, nextLocation.blockY, nextLocation.blockZ
             )
 
@@ -472,7 +556,7 @@ sealed interface NavigationActivityTaskState {
                 if (stepHeight > capabilities.maxStepHeight) {
                     val distanceToTarget = location.distanceSquaredWeightedY(target) ?: Double.POSITIVE_INFINITY
                     if (distanceToTarget < (JUMP_DISTANCE_THRESHOLD * (speed / JUMP_SPEED_DIVISOR))) {
-                        val world = location.world.toBukkitWorld()
+                        val world = blockView
                         if (blockCollision.hasHeadroom(boundingBox(), target, BukkitBlockGetter(world))) {
                             return calculateJumpVelocity(target, speed)
                         }
@@ -493,7 +577,7 @@ sealed interface NavigationActivityTaskState {
         }
 
         private fun stepHeightToTarget(target: PositionProperty): Double {
-            val world = location.world.toBukkitWorld()
+            val world = blockView
             val currentStandingBlock = currentStandingBlock(world)
 
             val targetBlockY = floor(target.y).toInt()
@@ -544,8 +628,7 @@ sealed interface NavigationActivityTaskState {
         }
 
         private fun calculateMovement(velocity: Vector): PhysicsResult {
-            val world = location.toBukkitLocation().world
-                ?: throw IllegalStateException("Trying to navigate in ${location.world} which is not loaded")
+            val world = blockView
 
             val result = blockCollision.handlePhysics(
                 boundingBox(),
@@ -567,7 +650,7 @@ sealed interface NavigationActivityTaskState {
 
         private fun lookTarget(): Vector? {
             val currentPath = patheticPath ?: return null
-            val world = location.world.toBukkitWorld()
+            val world = blockView
 
             if (pathIndex >= currentPath.length()) {
                 val surfaceY = computeSurfaceY(world, edge.end.blockX, edge.end.blockY, edge.end.blockZ)
@@ -581,7 +664,7 @@ sealed interface NavigationActivityTaskState {
             }
 
             val targetNode = currentPath.elementAtOrNull(lookAheadIndex) ?: return null
-            val targetBukkitLoc = BukkitMapper.toLocation(targetNode, world)
+            val targetBukkitLoc = org.bukkit.Location(null, targetNode.x, targetNode.y, targetNode.z)
             val targetLocation = targetBukkitLoc.toCenterLocation()
             val targetSurfaceY = computeSurfaceY(
                 world,
@@ -601,8 +684,8 @@ sealed interface NavigationActivityTaskState {
             val nextNode = currentPath.elementAtOrNull(pathIndex) ?: return false
             val lookAheadNode = currentPath.elementAtOrNull(pathIndex + rotationLookAhead) ?: return false
 
-            val nextPos = BukkitMapper.toLocation(nextNode, location.world.toBukkitWorld())
-            val lookAheadPos = BukkitMapper.toLocation(lookAheadNode, location.world.toBukkitWorld())
+            val nextPos = org.bukkit.Location(null, nextNode.x, nextNode.y, nextNode.z)
+            val lookAheadPos = org.bukkit.Location(null, lookAheadNode.x, lookAheadNode.y, lookAheadNode.z)
 
             val immediateDirection = Vector(
                 nextPos.x - location.x,
@@ -620,10 +703,12 @@ sealed interface NavigationActivityTaskState {
             return dotProduct < DIRECTION_CONFLICT_DOT_THRESHOLD
         }
 
-        override fun isComplete(): Boolean {
+        override fun isComplete(): Boolean = pathCalculationFailed || publishedComplete
+
+        private fun reachedEnd(): Boolean {
             if (pathCalculationFailed) return true
             val edgeEndSurfaceY = computeSurfaceY(
-                location.world.toBukkitWorld(),
+                blockView,
                 edge.end.blockX, edge.end.blockY, edge.end.blockZ
             )
             return (location.distanceSquaredWeightedY(edge.end.copy(y = edgeEndSurfaceY), 0.8)
@@ -642,13 +727,12 @@ sealed interface NavigationActivityTaskState {
         }
 
         override fun dispose() {
+            synchronized(generation) { generation.incrementAndGet() }
             pathCalculationJob?.cancel()
-            pathCalculationJob = null
-            lastPhysicsResult = null
             super.dispose()
         }
 
-        private fun currentStandingBlock(world: World): Block {
+        private fun currentStandingBlock(world: BlockView): BlockSnapshot {
             val (x, y, z) = Triple(location.blockX, location.blockY, location.blockZ)
 
             world.getBlockAt(x, y, z).takeIf { it.isSolid }?.let { return it }
@@ -671,13 +755,13 @@ sealed interface NavigationActivityTaskState {
             x + 1 to z, x - 1 to z, x to z + 1, x to z - 1
         )
 
-        private fun distanceSquaredTo(block: Block): Double {
+        private fun distanceSquaredTo(block: BlockSnapshot): Double {
             val dx = location.x - (block.x + 0.5)
             val dz = location.z - (block.z + 0.5)
             return dx * dx + dz * dz
         }
 
-        private fun worldObstacleHeightSwept(fromBlock: Block, toBlock: Block): Double {
+        private fun worldObstacleHeightSwept(fromBlock: BlockSnapshot, toBlock: BlockSnapshot): Double {
             val movementVector = toBlock.location.toVector()
                 .subtract(fromBlock.location.toVector())
                 .apply { y = 0.0 }
@@ -768,7 +852,7 @@ sealed interface NavigationActivityTaskState {
             }
         }
 
-        private fun worldSurfaceHeightAtCenter(block: Block): Double {
+        private fun worldSurfaceHeightAtCenter(block: BlockSnapshot): Double {
             val boundingBoxes = block.collisionShape.boundingBoxes
             val entityCenter = 0.5
             val halfWidth = capabilities.width / 2.0
@@ -784,7 +868,7 @@ sealed interface NavigationActivityTaskState {
             return block.y.toDouble() + maxHeight
         }
 
-        private fun computeSurfaceY(world: World, blockX: Int, blockY: Int, blockZ: Int): Double {
+        private fun computeSurfaceY(world: BlockView, blockX: Int, blockY: Int, blockZ: Int): Double {
             val groundBlock = world.getBlockAt(blockX, blockY - 1, blockZ)
             val groundSurfaceY = worldSurfaceHeightAtCenter(groundBlock)
 

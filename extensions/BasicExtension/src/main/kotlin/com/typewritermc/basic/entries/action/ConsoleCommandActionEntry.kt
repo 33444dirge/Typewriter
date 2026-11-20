@@ -43,8 +43,8 @@ class ConsoleCommandActionEntry(
         val command = command.get(player, context)
         // Run in the main thread
         if (command.isBlank()) return
+        val commands = command.parsePlaceholders(player).lines()
         Dispatchers.Sync.launch {
-            val commands = command.parsePlaceholders(player).lines()
             for (cmd in commands) {
                 server.dispatchCommand(Bukkit.getConsoleSender(), cmd)
             }

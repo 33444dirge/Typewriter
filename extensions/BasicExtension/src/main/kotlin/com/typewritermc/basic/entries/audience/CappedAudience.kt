@@ -12,19 +12,31 @@ abstract class CappedAudienceFilter(
     ref: Ref<out AudienceFilterEntry>,
     val capacity: Var<Int>,
 ) : AudienceFilter(ref), TickableDisplay {
-    protected var candidates = listOf<UUID>()
+    @Volatile protected var candidates = listOf<UUID>()
+    private val capacities = java.util.concurrent.ConcurrentHashMap<UUID, Int>()
+
+    protected fun sampledCapacity(): Int =
+        consideredPlayers.firstOrNull()?.let { capacities[it.uniqueId] } ?: 0
+
+    protected open fun refreshPlayer(player: Player) {}
 
     override fun filter(player: Player): Boolean = candidates.contains(player.uniqueId)
 
 
     override fun onPlayerAdd(player: Player) {
+        capacities[player.uniqueId] = capacity.get(player).coerceAtLeast(0)
+        refreshPlayer(player)
         refreshCandidates()
         super.onPlayerAdd(player)
     }
 
     override fun tick() {
+        forEachConsideredPlayer { player ->
+            capacities[player.uniqueId] = capacity.get(player).coerceAtLeast(0)
+            refreshPlayer(player)
+        }
         val players = consideredPlayers
-        val targetCapacity = capacity.get(players.random())
+        val targetCapacity = sampledCapacity()
         if (targetCapacity < candidates.size) {
             refreshCandidates()
         }
@@ -36,12 +48,13 @@ abstract class CappedAudienceFilter(
 
     override fun onPlayerRemove(player: Player) {
         super.onPlayerRemove(player)
+        capacities.remove(player.uniqueId)
         refreshCandidates()
     }
 
     protected fun refreshCandidates() {
         updateCandidates()
-        consideredPlayers.forEach { it.refresh() }
+        forEachConsideredPlayer { it.refresh() }
     }
 
     protected abstract fun updateCandidates()

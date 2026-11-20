@@ -14,6 +14,7 @@ import com.typewritermc.engine.paper.extensions.packetevents.sendPacketTo
 import io.github.retrooper.packetevents.util.SpigotConversionUtil
 import org.bukkit.Color
 import org.bukkit.entity.Player
+import kotlinx.coroutines.future.await
 import java.util.*
 import kotlin.math.cos
 import kotlin.math.sin
@@ -39,11 +40,22 @@ fun <RWP> RWP.toBukkitLocation(): org.bukkit.Location where RWP : Point<RWP>, RW
 
 fun <RWP> RWP.firstWalkableLocationBelow(maxDepth: Int = 7): RWP? where RWP : Point<RWP>, RWP : Rotatable<RWP>, RWP : WorldHolder<RWP> {
     val location = toBukkitLocation()
+    check(foliaScheduler.owns(location)) { "Ground lookup requires the target region" }
     repeat(maxDepth + 1) {
         if (!location.block.isPassable) return withY(location.y + 1)
         location.y--
     }
     return null
+}
+
+/** Captures a vertical ground lookup on its region without blocking a tick thread. */
+suspend fun <RWP> RWP.firstWalkableLocationBelowAsync(maxDepth: Int = 7): RWP?
+    where RWP : Point<RWP>, RWP : Rotatable<RWP>, RWP : WorldHolder<RWP> {
+    val target = toBukkitLocation()
+    return kotlinx.coroutines.withContext(target.regionDispatcher) {
+        requireNotNull(target.world).getChunkAtAsync(target.blockX shr 4, target.blockZ shr 4).await()
+        firstWalkableLocationBelow(maxDepth)
+    }
 }
 
 fun <RP> RP.toPacketLocation(): Location where RP : Point<RP>, RP : Rotatable<RP> {

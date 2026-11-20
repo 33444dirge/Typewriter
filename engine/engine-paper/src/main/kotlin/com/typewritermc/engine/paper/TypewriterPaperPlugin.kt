@@ -1,11 +1,15 @@
 package com.typewritermc.engine.paper
 
 import com.github.retrooper.packetevents.PacketEvents
+import com.github.shynixn.mccoroutine.folia.scope
 import com.google.gson.Gson
 import com.typewritermc.core.TypewriterCore
 import com.typewritermc.core.interaction.SessionTracker
 import com.typewritermc.core.serialization.createDataSerializerGson
 import com.typewritermc.core.utils.launch
+import com.typewritermc.core.utils.TypewriterCoroutineLifetime
+import com.typewritermc.core.utils.startAsyncWorkers
+import com.typewritermc.core.utils.closeAsyncWorkers
 import com.typewritermc.engine.paper.command.TypewriterCommandManager
 import com.typewritermc.engine.paper.content.ContentHandler
 import com.typewritermc.engine.paper.entry.*
@@ -36,12 +40,18 @@ import com.typewritermc.engine.paper.ui.CommunicationHandler
 import com.typewritermc.engine.paper.ui.PanelHost
 import com.typewritermc.engine.paper.ui.Writers
 import com.typewritermc.engine.paper.utils.PlayerHides
+import com.typewritermc.engine.paper.utils.WorldTimeSnapshots
+import com.typewritermc.engine.paper.utils.ConcurrentYamlFile
 import com.typewritermc.engine.paper.utils.Sync
 import com.typewritermc.engine.paper.utils.createBukkitDataParser
 import com.typewritermc.loader.DependencyChecker
-import io.papermc.paper.plugin.lifecycle.event.registrar.ReloadableRegistrarEvent
 import io.papermc.paper.plugin.lifecycle.event.types.LifecycleEvents
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import com.typewritermc.engine.paper.utils.foliaScheduler
 import kotlinx.coroutines.delay
 import lirand.api.architecture.KotlinPlugin
 import org.bukkit.plugin.Plugin
@@ -62,10 +72,15 @@ import org.koin.java.KoinJavaComponent
 import java.io.File
 import java.util.logging.Level.*
 import java.util.logging.Logger
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.time.Duration.Companion.seconds
 
 @Suppress("UnstableApiUsage")
 class TypewriterPaperPlugin : KotlinPlugin(), KoinComponent {
+    internal val configurationFile by lazy { ConcurrentYamlFile(File(dataFolder, "config.yml")) }
+    private val reloadMutex = Mutex()
+    private val stopping = AtomicBoolean()
+    @Volatile private var koinStarted = false
     override fun onLoad() {
         super.onLoad()
         val modules = module {
@@ -100,7 +115,7 @@ class TypewriterPaperPlugin : KotlinPlugin(), KoinComponent {
             singleOf(::CommunicationHandler)
             singleOf(::Writers)
             singleOf(::PanelHost)
-            singleOf<SnippetDatabase>(::SnippetDatabaseImpl)
+            singleOf(::SnippetDatabaseImpl) bind SnippetDatabase::class
             singleOf(::FactDatabase)
             singleOf<FactStorage>(::FileFactStorage)
             singleOf(::EntryListeners)
@@ -139,14 +154,21 @@ class TypewriterPaperPlugin : KotlinPlugin(), KoinComponent {
         startKoin {
             modules(modules, TypewriterCore.module, dataSerializerModule)
         }
+        koinStarted = true
     }
 
     override suspend fun onEnableAsync() {
+        check(koinStarted) { "Typewriter failed to load its services; see the earlier startup error" }
+        startAsyncWorkers()
+        TypewriterCoroutineLifetime.attachPlatform(this.scope.coroutineContext[Job])
+        configurationFile.load()
+        get<SnippetDatabaseImpl>().load()
         PacketEvents.getAPI().settings.downsampleColors(false)
 
         get<FactDatabase>().initialize()
         get<AssetManager>().initialize()
         get<PlayerSessionManager>().initialize()
+        get<Confirmations>().initialize()
         get<ChatHistoryHandler>().initialize()
         get<ActionBarBlockerHandler>().initialize()
         get<PacketInterceptor>().initialize()
@@ -160,33 +182,38 @@ class TypewriterPaperPlugin : KotlinPlugin(), KoinComponent {
 
         BStatsMetrics.registerMetrics()
 
-        // This is a hack to get the minecraft dispatcher.
-        // As we need to dynamically add and remove commands on the fly
+        get<TypewriterCommandManager>().initialize()
         this.lifecycleManager.registerEventHandler(LifecycleEvents.COMMANDS) {
             val manager = get<TypewriterCommandManager>()
-            manager.registerDispatcher(it.registrar().dispatcher)
-            if (it.cause() == ReloadableRegistrarEvent.Cause.RELOAD) {
-                manager.registerCommands()
-            }
+            manager.registerDispatcher(it.registrar())
         }
         // We want to initialize all the extensions after all the plugins have been enabled to make sure
         // that all the plugins are loaded.
         Dispatchers.Sync.launch {
             delay(100)
             load()
-            get<CommunicationHandler>().initialize()
+            withContext(Dispatchers.IO) { get<CommunicationHandler>().initialize() }
 
             delay(5.seconds)
             Modrinth.initialize()
         }
     }
 
-    suspend fun load() {
+    suspend fun load() = reloadMutex.withLock {
+        check(!stopping.get()) { "Typewriter is stopping" }
+        loadState()
+    }
+
+    private suspend fun loadState() {
+        configurationFile.load()
+        get<SnippetDatabaseImpl>().load()
+        TypewriterCoroutineLifetime.beginGeneration()
         // Needs to be first, as it will load the classLoader
         get<TypewriterCore>().load()
 
-        get<StagingManager>().loadState()
+        withContext(Dispatchers.IO) { get<StagingManager>().loadState() }
         get<CommunicationHandler>().load()
+        WorldTimeSnapshots.load()
         get<PlayerSessionManager>().load()
         get<EntryListeners>().load()
         get<AudienceManager>().load()
@@ -197,46 +224,85 @@ class TypewriterPaperPlugin : KotlinPlugin(), KoinComponent {
         }
     }
 
-    suspend fun unload() {
-        TypewriterUnloadEvent().callEvent()
+    suspend fun unload() = reloadMutex.withLock { unloadState() }
 
-        get<TypewriterCommandManager>().unregisterCommands()
-
-        get<PacketInterceptor>().unload()
-        get<AudienceManager>().unload()
-        get<EntryListeners>().unload()
-        get<PlayerSessionManager>().unload()
-        get<StagingManager>().unload()
-
-        if (server.pluginManager.getPlugin("PlaceholderAPI") != null) {
-            PlaceholderExpansion.unload()
+    private suspend fun unloadState() {
+        val failures = mutableListOf<Throwable>()
+        suspend fun step(name: String, action: suspend () -> Unit) {
+            cleanup(name, action)?.let(failures::add)
         }
 
-        // Needs to be last, as it will unload the classLoader
-        get<TypewriterCore>().unload()
+        step("generation") { TypewriterCoroutineLifetime.stopGeneration() }
+        step("world clock snapshots") { WorldTimeSnapshots.clear() }
+        step("unload event") { TypewriterUnloadEvent().callEvent() }
+        step("commands") { get<TypewriterCommandManager>().unregisterCommands() }
+        step("packet interceptors") { get<PacketInterceptor>().unload() }
+        step("audience displays") { get<AudienceManager>().unload() }
+        step("entry listeners") { get<EntryListeners>().unload() }
+        step("player sessions") { get<PlayerSessionManager>().unload() }
+        step("confirmations") { get<Confirmations>().clear() }
+        step("staging") { withContext(Dispatchers.IO) { get<StagingManager>().unload() } }
+        step("placeholders") {
+            if (server.pluginManager.getPlugin("PlaceholderAPI") != null) PlaceholderExpansion.unload()
+        }
+        step("extensions") { get<TypewriterCore>().unload() }
+
+        if (failures.isNotEmpty()) {
+            val failure = IllegalStateException("Typewriter unload failed in ${failures.size} cleanup steps")
+            failures.forEach(failure::addSuppressed)
+            throw failure
+        }
     }
 
-    suspend fun reload() {
-        unload()
-        load()
+    suspend fun reload() = reloadMutex.withLock {
+        check(!stopping.get()) { "Typewriter is stopping" }
+        unloadState()
+        check(!stopping.get()) { "Typewriter is stopping" }
+        loadState()
     }
 
     val isGeyserInstalled: Boolean by lazy { server.pluginManager.isPluginEnabled("Geyser-Spigot") }
     val isFloodgateInstalled: Boolean by lazy { server.pluginManager.isPluginEnabled("Floodgate") }
 
     override suspend fun onDisableAsync() {
-        get<StagingManager>().shutdown()
-        get<FactDatabase>().shutdown()
-        get<ChatHistoryHandler>().shutdown()
-        get<ActionBarBlockerHandler>().shutdown()
-        get<PacketInterceptor>().shutdown()
-        get<CommunicationHandler>().shutdown()
-        get<PlayerSessionManager>().shutdown()
-        get<AssetManager>().shutdown()
-        get<AudienceManager>().shutdown()
-        get<EntityHandler>().shutdown()
+        if (!stopping.compareAndSet(false, true)) return
+        if (!koinStarted) return
+        cleanup("update notifications") { Modrinth.shutdown() }
+        cleanup("pending scheduling") { foliaScheduler.close() }
+        reloadMutex.withLock {
+            try {
+                cleanup("generation") { TypewriterCoroutineLifetime.stopGeneration() }
+                cleanup("world clock snapshots") { WorldTimeSnapshots.clear() }
+                cleanup("staging shutdown") { withContext(Dispatchers.IO) { get<StagingManager>().shutdown() } }
+                cleanup("fact storage") { get<FactDatabase>().shutdown() }
+                cleanup("chat history") { get<ChatHistoryHandler>().shutdown() }
+                cleanup("action bars") { get<ActionBarBlockerHandler>().shutdown() }
+                cleanup("packet listener") { get<PacketInterceptor>().shutdown() }
+                cleanup("web panel") { withContext(Dispatchers.IO) { get<CommunicationHandler>().shutdown() } }
+                cleanup("player sessions shutdown") { get<PlayerSessionManager>().shutdown() }
+                cleanup("confirmations shutdown") { get<Confirmations>().shutdown() }
+                cleanup("assets") { get<AssetManager>().shutdown() }
+                cleanup("audience shutdown") { get<AudienceManager>().shutdown() }
+                cleanup("entities") { get<EntityHandler>().shutdown() }
+                cleanup("unload") { unloadState() }
+                cleanup("command listeners") { get<TypewriterCommandManager>().shutdown() }
+            } finally {
+                cleanup("snippets configuration") { get<SnippetDatabaseImpl>().shutdown() }
+                cleanup("plugin configuration") { configurationFile.close() }
+                cleanup("player visibility") { get<PlayerHides>().shutdown() }
+                cleanup("platform jobs") { TypewriterCoroutineLifetime.stopPlatform() }
+                cleanup("schedulers") { foliaScheduler.close() }
+                cleanup("worker pool") { closeAsyncWorkers() }
+            }
+        }
+    }
 
-        unload()
+    private suspend fun cleanup(name: String, action: suspend () -> Unit): Throwable? = try {
+        action()
+        null
+    } catch (error: Throwable) {
+        logger.log(SEVERE, "Failed to clean up Typewriter $name", error)
+        error
     }
 }
 

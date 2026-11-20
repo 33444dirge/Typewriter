@@ -37,9 +37,10 @@ class MythicMobKillPlayerEventEntry(
 @EntryListener(MythicMobKillPlayerEventEntry::class)
 fun onMythicMobKillPlayer(event: PlayerDeathEvent, query: Query<MythicMobKillPlayerEventEntry>) {
     val causingEntity = event.damageSource.causingEntity ?: return
-    val mythicMob = MythicBukkit.inst().mobManager.getMythicMobInstance(causingEntity) ?: return
+    val causingId = causingEntity.uniqueId
+    val type = MythicBukkit.inst().mobManager.activeMobs.firstOrNull { it.uniqueId == causingId }?.mobType ?: return
 
     query.findWhere { entry ->
-        entry.mythicMobType.map { it.toRegex().matches(mythicMob.mobType) }.orElse(true)
+        entry.mythicMobType.map { it.toRegex().matches(type) }.orElse(true)
     }.triggerAllFor(event.player, context())
 }

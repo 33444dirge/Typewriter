@@ -99,6 +99,11 @@ class HitBoxEntity(
         return super.contains(entityId) || baseEntity.contains(entityId)
     }
 
+    override fun retireResources() {
+        baseEntity.retireResources()
+        super.retireResources()
+    }
+
     override fun dispose() {
         super.dispose()
         baseEntity.dispose()

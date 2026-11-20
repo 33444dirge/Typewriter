@@ -9,6 +9,7 @@ import com.typewritermc.engine.paper.entry.entries.AudienceDisplay
 import com.typewritermc.engine.paper.entry.entries.AudienceEntry
 import com.typewritermc.engine.paper.entry.entries.GroupEntry
 import com.typewritermc.engine.paper.utils.position
+import com.typewritermc.engine.paper.entry.entity.viewerSnapshot
 import com.typewritermc.roadnetwork.RoadNetworkEntry
 import com.typewritermc.roadnetwork.entries.PathStreamDisplayEntry
 import com.typewritermc.roadnetwork.entries.SinglePathStreamDisplay
@@ -39,12 +40,13 @@ class ClosestGroupMemberPathStream(
     val group: Ref<out GroupEntry> = emptyRef(),
 ) : AudienceEntry {
     override suspend fun display(): AudienceDisplay = SinglePathStreamDisplay(road, { display }) { player ->
+        val origin = player.position
         group.get()?.group(player)?.players
             ?.asSequence()
             ?.filter { it != player }
-            ?.filter { player.world == it.world }
-            ?.minByOrNull { it.position.distanceSquared(player.position)!! }
-            ?.position
-            ?: player.position
+            ?.mapNotNull { it.viewerSnapshot?.position?.toPosition() }
+            ?.filter { origin.world == it.world }
+            ?.minByOrNull { it.distanceSquared(origin)!! }
+            ?: origin
     }
 }

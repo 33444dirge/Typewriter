@@ -88,10 +88,9 @@ class ParticleAudienceFilter(
 
     override fun tick() {
         val now = Clock.System.now()
-        consideredPlayers
-            .filter { it.refresh() }
-            .filter { nextTimes.getOrPut(it.uniqueId) { now } <= now }
-            .forEach { player ->
+        forEachConsideredPlayer { player ->
+                if (!player.refresh()) return@forEachConsideredPlayer
+                if (nextTimes.getOrPut(player.uniqueId) { now } > now) return@forEachConsideredPlayer
                 // Counted from now rather than from the time that just came due. A player who was
                 // out of the audience for a while has one far in the past, and stepping it forward
                 // by a single delay at a time would fire once a tick until it caught up.

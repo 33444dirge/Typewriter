@@ -52,8 +52,9 @@ class BossBarDisplay(
     private val bars = ConcurrentHashMap<UUID, BossBar>()
 
     override fun tick() {
-        for ((id, bar) in bars) {
-            val player = server.getPlayer(id) ?: continue
+        forEachPlayer { player ->
+            val id = player.uniqueId
+            val bar = bars[id] ?: return@forEachPlayer
             bar.name(title.get(player).parsePlaceholders(id).asMini())
             bar.progress(progress.get(player).toFloat().coerceIn(0.0f, 1.0f))
             bar.color(color.get(player))

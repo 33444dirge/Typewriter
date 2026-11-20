@@ -9,15 +9,14 @@ import de.bsommerfeld.pathetic.api.pathing.processing.ValidationProcessor
 import de.bsommerfeld.pathetic.api.pathing.processing.context.EvaluationContext
 import de.bsommerfeld.pathetic.api.pathing.processing.context.SearchContext
 import de.bsommerfeld.pathetic.api.wrapper.PathPosition
-import de.bsommerfeld.pathetic.bukkit.context.BukkitEnvironmentContext
-import de.bsommerfeld.pathetic.bukkit.mapper.BukkitMapper
+import com.typewritermc.roadnetwork.pathfinding.pathetic.SnapshotEnvironmentContext
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap
 import it.unimi.dsi.fastutil.objects.ObjectOpenHashSet
 import it.unimi.dsi.fastutil.objects.ObjectSet
 import org.bukkit.Material
 import org.bukkit.Tag
-import org.bukkit.block.Block
+import com.typewritermc.engine.paper.utils.BlockSnapshot
 import org.bukkit.block.data.Openable
 import org.bukkit.block.data.type.Door
 import org.bukkit.block.data.type.Gate
@@ -107,15 +106,13 @@ class NodeTypeProcessor(private val capabilities: EntityPathingCapabilities = En
     ): Set<PathNodeProperty> {
         val cache = cache(context)
         val packedPos = pack(position.flooredX, position.flooredY, position.flooredZ)
-        val environmentContext: BukkitEnvironmentContext = context.environmentContext as BukkitEnvironmentContext
+        val environmentContext: SnapshotEnvironmentContext = context.environmentContext as SnapshotEnvironmentContext
 
         cache[packedPos]?.let { return it }
 
         return ObjectOpenHashSet<PathNodeProperty>().apply {
-            val location = BukkitMapper.toLocation(position, environmentContext.world)
-            val world = location.world ?: return@apply
-
-            val block = location.block
+            val world = environmentContext.world
+            val block = world.getBlockAt(position.flooredX, position.flooredY, position.flooredZ)
             val blockData = block.blockData
             val blockType = block.type
 
@@ -185,7 +182,7 @@ class NodeTypeProcessor(private val capabilities: EntityPathingCapabilities = En
                 add(PathNodeProperty.SURFACE_FEATURE)
             }
 
-            val blockBelow = world.getBlockAt(location.blockX, location.blockY - 1, location.blockZ)
+            val blockBelow = world.getBlockAt(position.flooredX, position.flooredY - 1, position.flooredZ)
             if (isSurfaceWalkable(blockBelow)) {
                 add(PathNodeProperty.WALKABLE_SURFACE)
             }
@@ -196,7 +193,7 @@ class NodeTypeProcessor(private val capabilities: EntityPathingCapabilities = En
      * A surface is considered walkable if the block is solid and provides
      * a horizontal surface that an entity can actually stand on.
      */
-    private fun isSurfaceWalkable(surfaceBlock: Block): Boolean {
+    private fun isSurfaceWalkable(surfaceBlock: BlockSnapshot): Boolean {
         val collisionBoxes = surfaceBlock.collisionShape.boundingBoxes
         if (!surfaceBlock.isSolid && collisionBoxes.isEmpty()) return false
 

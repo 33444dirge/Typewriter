@@ -26,6 +26,9 @@ import org.bukkit.entity.Player
 import org.bukkit.event.EventHandler
 import org.bukkit.event.Listener
 import org.bukkit.event.player.PlayerJoinEvent
+import org.bukkit.event.player.PlayerQuitEvent
+import com.typewritermc.engine.paper.utils.entityDispatcher
+import kotlinx.coroutines.isActive
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
 import java.util.*
@@ -67,27 +70,32 @@ enum class BalanceChangeContextKeys(override val klass: KClass<*>) : EntryContex
 
 @Singleton
 class BalanceLoop : Initializable, Listener, KoinComponent {
-    private var job: Job? = null
+    private val jobs = ConcurrentHashMap<UUID, Job>()
+    @Volatile private var entries = emptyList<BalanceChangeEventEntry>()
+    @Volatile private var running = false
     private val vaultInitializer: VaultInitializer by inject()
     private val cachedBalance = ConcurrentHashMap<UUID, Double>()
 
     override suspend fun initialize() {
         val entries = Query.find<BalanceChangeEventEntry>().toList()
         if (entries.isEmpty()) return
-        vaultInitializer.economy?.let {
-            server.onlinePlayers.forEach { player ->
-                val balance = it.getBalance(player)
-                cachedBalance[player.uniqueId] = balance
-            }
-        }
+        this.entries = entries
+        running = true
         plugin.registerEvents(this)
+        server.onlinePlayers.forEach(::start)
+    }
 
-        job = Dispatchers.UntickedAsync.launch {
-            while (plugin.isEnabled) {
-                delay(100)
-                val economy = vaultInitializer.economy ?: continue
-                server.onlinePlayers.forEach { player ->
-                    player.checkBalance(economy, entries)
+    private fun start(player: Player) {
+        if (!running) return
+        jobs.computeIfAbsent(player.uniqueId) {
+            player.entityDispatcher.launch {
+                vaultInitializer.economy?.let { economy ->
+                    cachedBalance[player.uniqueId] = economy.getBalance(player)
+                }
+                while (isActive && running) {
+                    delay(100)
+                    val economy = vaultInitializer.economy ?: continue
+                    if (isActive && running) player.checkBalance(economy, entries)
                 }
             }
         }
@@ -98,10 +106,10 @@ class BalanceLoop : Initializable, Listener, KoinComponent {
         entries: List<BalanceChangeEventEntry>
     ) {
         val balance = economy.getBalance(this)
-        val oldBalance = cachedBalance.getOrDefault(uniqueId, balance)
+        val oldBalance = cachedBalance.put(uniqueId, balance) ?: return
         if (balance == oldBalance) return
 
-        cachedBalance[uniqueId] = balance
+        if (!running) return
         entries.triggerAllFor(this) {
             BalanceChangeContextKeys.PREVIOUS_BALANCE withValue oldBalance
             BalanceChangeContextKeys.NEW_BALANCE withValue balance
@@ -112,22 +120,22 @@ class BalanceLoop : Initializable, Listener, KoinComponent {
 
     @EventHandler
     private fun onPlayerJoin(event: PlayerJoinEvent) {
-        val player = event.player
-        val economy = vaultInitializer.economy ?: return
-        val balance = economy.getBalance(player)
-        cachedBalance[player.uniqueId] = balance
+        start(event.player)
     }
 
     @EventHandler
-    private fun onPlayerQuit(event: PlayerJoinEvent) {
+    private fun onPlayerQuit(event: PlayerQuitEvent) {
         val player = event.player
+        jobs.remove(player.uniqueId)?.cancel()
         cachedBalance.remove(player.uniqueId)
     }
 
     override suspend fun shutdown() {
+        running = false
         unregister()
-        job?.cancel()
-        job = null
+        jobs.values.forEach { it.cancel() }
+        jobs.clear()
+        entries = emptyList()
         cachedBalance.clear()
     }
 

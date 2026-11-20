@@ -12,7 +12,7 @@ import com.typewritermc.engine.paper.entry.entries.EntityActivityEntry
 import com.typewritermc.engine.paper.entry.entries.EntityProperty
 import com.typewritermc.engine.paper.entry.entries.GenericEntityActivityEntry
 import com.typewritermc.engine.paper.snippets.snippet
-import com.typewritermc.engine.paper.utils.firstWalkableLocationBelow
+import com.typewritermc.engine.paper.utils.firstWalkableLocationBelowAsync
 import com.typewritermc.roadnetwork.RoadNetworkEntry
 import com.typewritermc.roadnetwork.gps.PointToPointGPS
 
@@ -64,7 +64,7 @@ class TargetLocationActivity(
                     network,
                     {
                         val start = searchStart.toPosition()
-                        start.firstWalkableLocationBelow() ?: start
+                        start.firstWalkableLocationBelowAsync() ?: start
                     },
                     { targetPosition },
                 ),

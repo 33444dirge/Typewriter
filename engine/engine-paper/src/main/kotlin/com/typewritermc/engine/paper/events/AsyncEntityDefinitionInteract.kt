@@ -14,7 +14,7 @@ class AsyncFakeEntityInteract(
     val entityId: Int,
     val hand: InteractionHand,
     val action: InteractAction,
-) : PlayerEvent(player, true) {
+) : PlayerEvent(player, !org.bukkit.Bukkit.isOwnedByCurrentRegion(player)) {
     override fun getHandlers(): HandlerList = HANDLER_LIST
 
     companion object {
@@ -34,7 +34,7 @@ class AsyncEntityDefinitionInteract(
     val hand: InteractionHand,
     val action: InteractAction,
     val shift: Boolean,
-) : PlayerEvent(player, true) {
+) : PlayerEvent(player, !org.bukkit.Bukkit.isOwnedByCurrentRegion(player)) {
     override fun getHandlers(): HandlerList = HANDLER_LIST
 
     companion object {

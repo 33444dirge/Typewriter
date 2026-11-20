@@ -1,5 +1,7 @@
 package com.typewritermc.basic.entries.action
 
+import com.typewritermc.engine.paper.utils.entityDispatcher
+
 import com.typewritermc.core.books.pages.Colors
 import com.typewritermc.core.entries.Ref
 import com.typewritermc.core.extension.annotations.Entry
@@ -48,7 +50,7 @@ class DropItemActionEntry(
         }
         val item = item.get(player, context).build(player, context)
         // Run on main thread
-        Dispatchers.Sync.launch {
+        player.entityDispatcher.launch {
             location.world.dropItem(location, item)
         }
     }

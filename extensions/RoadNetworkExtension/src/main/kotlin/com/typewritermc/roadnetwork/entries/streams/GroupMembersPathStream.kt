@@ -7,6 +7,8 @@ import com.typewritermc.core.extension.annotations.Entry
 import com.typewritermc.engine.paper.entry.entries.AudienceDisplay
 import com.typewritermc.engine.paper.entry.entries.AudienceEntry
 import com.typewritermc.engine.paper.entry.entries.GroupEntry
+import com.typewritermc.engine.paper.entry.entity.ViewerSnapshots
+import com.typewritermc.engine.paper.entry.entity.viewerSnapshot
 import com.typewritermc.engine.paper.utils.position
 import com.typewritermc.roadnetwork.RoadNetworkEntry
 import com.typewritermc.roadnetwork.entries.MultiPathStreamDisplay
@@ -39,11 +41,13 @@ class GroupMembersPathStream(
     override suspend fun display(): AudienceDisplay = MultiPathStreamDisplay(road, streams = { player ->
         group.get()?.group(player)?.players
             ?.filter { it != player }
-            ?.map { target ->
+            ?.mapNotNull { target ->
+                val playerId = target.uniqueId
+                val initialPosition = target.viewerSnapshot?.position?.toPosition() ?: return@mapNotNull null
                 StreamProducer(
-                    target.uniqueId.toString(),
+                    playerId.toString(),
                     display,
-                    endPosition = { target.position },
+                    endPosition = { ViewerSnapshots[playerId]?.position?.toPosition() ?: initialPosition },
                 )
             }
             ?: emptyList()

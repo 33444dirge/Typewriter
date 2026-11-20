@@ -9,8 +9,7 @@ import de.bsommerfeld.pathetic.api.pathing.processing.ValidationProcessor
 import de.bsommerfeld.pathetic.api.pathing.processing.context.EvaluationContext
 import de.bsommerfeld.pathetic.api.pathing.processing.context.SearchContext
 import de.bsommerfeld.pathetic.api.wrapper.PathPosition
-import de.bsommerfeld.pathetic.bukkit.context.BukkitEnvironmentContext
-import de.bsommerfeld.pathetic.bukkit.mapper.BukkitMapper
+import com.typewritermc.roadnetwork.pathfinding.pathetic.SnapshotEnvironmentContext
 import it.unimi.dsi.fastutil.longs.Long2DoubleMap
 import it.unimi.dsi.fastutil.longs.Long2DoubleOpenHashMap
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap
@@ -307,24 +306,24 @@ class ObstructionProcessor(private val capabilities: EntityPathingCapabilities =
     private fun blocksInEntityBounds(
         context: EvaluationContext,
         entityCenter: Vector
-    ): List<Pair<PathPosition, org.bukkit.block.Block>> {
+    ): List<Pair<PathPosition, com.typewritermc.engine.paper.utils.BlockSnapshot>> {
         val halfWidth = capabilities.width / 2.0
         val halfHeight = capabilities.height / 2.0
         val searchBox = BoundingBox.of(entityCenter, halfWidth, halfHeight, halfWidth)
-        val environmentContext = context.environmentContext as BukkitEnvironmentContext
+        val environmentContext = context.environmentContext as SnapshotEnvironmentContext
 
         val (xPair, yPair, zPair) = flooredBounds(searchBox)
         val (minBx, maxBx) = xPair
         val (minBy, maxBy) = yPair
         val (minBz, maxBz) = zPair
 
-        val blocks = mutableListOf<Pair<PathPosition, org.bukkit.block.Block>>()
+        val blocks = mutableListOf<Pair<PathPosition, com.typewritermc.engine.paper.utils.BlockSnapshot>>()
 
         for (bx in minBx..maxBx) {
             for (by in minBy..maxBy) {
                 for (bz in minBz..maxBz) {
                     val blockPos = PathPosition(bx.toDouble(), by.toDouble(), bz.toDouble())
-                    val block = BukkitMapper.toLocation(blockPos, environmentContext.world).block
+                    val block = environmentContext.world.getBlockAt(blockPos.flooredX, blockPos.flooredY, blockPos.flooredZ)
                     blocks.add(blockPos to block)
                 }
             }
@@ -383,8 +382,8 @@ class ObstructionProcessor(private val capabilities: EntityPathingCapabilities =
 
         // On a cache miss, calculate the ground Y.
         // We know WALKABLE_SURFACE is present, so the block below the current position is the ground.
-        val environmentContext = context.environmentContext as BukkitEnvironmentContext
-        val groundBlock = BukkitMapper.toLocation(position, environmentContext.world).block.getRelative(0, -1, 0)
+        val environmentContext = context.environmentContext as SnapshotEnvironmentContext
+        val groundBlock = environmentContext.world.getBlockAt(position.flooredX, position.flooredY - 1, position.flooredZ)
         var maxY = 0.0
         groundBlock.collisionShape.boundingBoxes.forEach { box -> maxY = max(maxY, box.maxY) }
 
@@ -412,7 +411,7 @@ class ObstructionProcessor(private val capabilities: EntityPathingCapabilities =
         val halfWidth = capabilities.width / 2.0
         val halfHeight = capabilities.height / 2.0
         val searchBox = BoundingBox.of(entityCenter, halfWidth, halfHeight, halfWidth)
-        val environmentContext: BukkitEnvironmentContext = context.environmentContext as BukkitEnvironmentContext
+        val environmentContext: SnapshotEnvironmentContext = context.environmentContext as SnapshotEnvironmentContext
 
         val (xPair, yPair, zPair) = flooredBounds(searchBox)
         val (minBx, maxBx) = xPair
@@ -435,7 +434,7 @@ class ObstructionProcessor(private val capabilities: EntityPathingCapabilities =
                         }
                     }
 
-                    val block = BukkitMapper.toLocation(blockPos, environmentContext.world).block
+                    val block = environmentContext.world.getBlockAt(blockPos.flooredX, blockPos.flooredY, blockPos.flooredZ)
                     for (blockBox in block.collisionShape.boundingBoxes) {
                         val worldBlockBox = blockBox.clone().shift(bx.toDouble(), by.toDouble(), bz.toDouble())
                         val inflatedBox = createInflatedBox(worldBlockBox)

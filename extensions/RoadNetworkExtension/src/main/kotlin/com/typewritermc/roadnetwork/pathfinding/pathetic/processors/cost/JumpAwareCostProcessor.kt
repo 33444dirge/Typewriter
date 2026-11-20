@@ -5,8 +5,7 @@ import de.bsommerfeld.pathetic.api.pathing.processing.Cost
 import de.bsommerfeld.pathetic.api.pathing.processing.CostProcessor
 import de.bsommerfeld.pathetic.api.pathing.processing.context.EvaluationContext
 import de.bsommerfeld.pathetic.api.wrapper.PathPosition
-import de.bsommerfeld.pathetic.bukkit.context.BukkitEnvironmentContext
-import de.bsommerfeld.pathetic.bukkit.mapper.BukkitMapper
+import com.typewritermc.roadnetwork.pathfinding.pathetic.SnapshotEnvironmentContext
 import org.bukkit.util.BoundingBox
 import kotlin.math.max
 
@@ -52,9 +51,8 @@ class JumpAwareCostProcessor(
         toPos: PathPosition,
         context: EvaluationContext
     ): Double {
-        val environmentContext = context.environmentContext as BukkitEnvironmentContext
-        val toLocation = BukkitMapper.toLocation(toPos, environmentContext.world)
-        val targetBlock = toLocation.block.getRelative(0, -1, 0)
+        val environmentContext = context.environmentContext as SnapshotEnvironmentContext
+        val targetBlock = environmentContext.world.getBlockAt(toPos.flooredX, toPos.flooredY - 1, toPos.flooredZ)
         val collisionShape = targetBlock.collisionShape
 
         if (collisionShape.boundingBoxes.isEmpty()) {

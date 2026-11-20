@@ -25,6 +25,10 @@ import org.bukkit.inventory.EquipmentSlot
 import org.bukkit.inventory.ItemStack
 import org.bukkit.potion.PotionEffect
 import org.bukkit.potion.PotionEffectType
+import kotlinx.coroutines.future.await
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 
 interface PlayerStateProvider {
     fun store(player: Player): Any
@@ -37,7 +41,7 @@ data class PlayerState(
 
 enum class GenericPlayerStateProvider(private val store: Player.() -> Any, private val restore: Player.(Any) -> Unit) :
     PlayerStateProvider {
-    LOCATION({ location }, { teleport(it as Location) }),
+    LOCATION({ location.clone() }, { foliaScheduler.teleport(this, it as Location) }),
     GAME_MODE({ gameMode }, { gameMode = it as GameMode }),
     EXP({ exp }, { exp = it as Float }),
     LEVEL({ level }, { level = it as Int }),
@@ -85,7 +89,7 @@ enum class GenericPlayerStateProvider(private val store: Player.() -> Any, priva
 }
 
 data class EffectStateProvider(
-    private val effect: PotionEffectType,
+    val effect: PotionEffectType,
 ) : PlayerStateProvider {
     override fun store(player: Player): Any {
         return player.getPotionEffect(effect) ?: return false
@@ -146,6 +150,27 @@ fun Player.state(keys: List<PlayerStateProvider>): PlayerState {
 
 fun Player.restore(state: PlayerState?) {
     state?.state?.forEach { (key, value) -> key.restore(this, value) }
+}
+
+/** Restores destination-dependent state only after the asynchronous move has finished. */
+suspend fun Player.restoreAsync(state: PlayerState?): Boolean {
+    state ?: return true
+    val destination = state.state[GenericPlayerStateProvider.LOCATION] as? Location
+    var moveFailure: Exception? = null
+    val moved = try {
+        destination == null || foliaScheduler.teleport(this, destination).await()
+    } catch (error: Exception) {
+        currentCoroutineContext().ensureActive()
+        moveFailure = error
+        false
+    }
+    withContext(entityDispatcher) {
+        state.state.filterKeys { it != GenericPlayerStateProvider.LOCATION }.forEach { (key, value) ->
+            key.restore(this@restoreAsync, value)
+        }
+    }
+    moveFailure?.let { throw it }
+    return moved
 }
 
 val fakeAir: com.github.retrooper.packetevents.protocol.item.ItemStack by lazy {

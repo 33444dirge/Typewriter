@@ -19,6 +19,8 @@ import com.typewritermc.engine.paper.plugin
 import com.typewritermc.engine.paper.snippets.snippet
 import com.typewritermc.engine.paper.utils.distanceSqrt
 import com.typewritermc.engine.paper.utils.toPosition
+import com.typewritermc.engine.paper.utils.foliaScheduler
+import kotlinx.coroutines.future.await
 import com.typewritermc.entity.entries.activity.*
 import com.typewritermc.entity.entries.event.InteractingEntityInstance
 import org.bukkit.NamespacedKey
@@ -173,10 +175,10 @@ class LookAtNpcInteractionBound(
             smoothTime = 0.20f
         )
 
-        player.teleportAsync(player.location.clone().apply {
+        foliaScheduler.teleport(player, player.location.clone().apply {
             yaw = newYaw
             pitch = newPitch
-        })
+        }).await()
         val yawDiff = abs(normalizeYaw(targetYaw - newYaw))
         val pitchDiff = abs(targetPitch - newPitch)
 

@@ -180,6 +180,13 @@ class NamedEntity(
         return false
     }
 
+    override fun retireResources() {
+        baseEntity.retireResources()
+        hologram.retireResources()
+        indicatorEntity.retireResources()
+        super.retireResources()
+    }
+
     override fun dispose() {
         baseEntity.dispose()
         hologram.dispose()

@@ -107,6 +107,11 @@ class NpcEntity(
         return namePlate.contains(entityId)
     }
 
+    override fun retireResources() {
+        namePlate.retireResources()
+        super.retireResources()
+    }
+
     override fun dispose() {
         namePlate.dispose()
     }

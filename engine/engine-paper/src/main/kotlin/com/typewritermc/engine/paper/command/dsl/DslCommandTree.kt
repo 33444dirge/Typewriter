@@ -99,6 +99,12 @@ class ArgumentCommandTree<S, T>(
     private val type: ArgumentType<T>,
 ) : DslCommandTree<S, RequiredArgumentBuilder<S, T>>() {
     private var suggestionsProvider: SuggestionProvider<S>? = null
+
+    /** Supplies completions for arguments whose values depend on the current command snapshot. */
+    fun suggests(provider: SuggestionProvider<S>) {
+        suggestionsProvider = provider
+    }
+
     override fun buildArgument(): RequiredArgumentBuilder<S, T> {
         return RequiredArgumentBuilder.argument<S, T>(name, type).suggests(suggestionsProvider)
     }

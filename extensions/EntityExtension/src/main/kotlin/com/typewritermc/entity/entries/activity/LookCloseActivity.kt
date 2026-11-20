@@ -8,7 +8,9 @@ import com.typewritermc.engine.paper.entry.entity.*
 import com.typewritermc.engine.paper.entry.entries.GenericEntityActivityEntry
 import com.typewritermc.engine.paper.snippets.snippet
 import com.typewritermc.engine.paper.utils.isLookable
-import org.bukkit.entity.Player
+import com.typewritermc.engine.paper.entry.entity.ViewerSnapshots
+import com.typewritermc.engine.paper.entry.entity.viewerSnapshot
+import java.util.UUID
 
 private val playerLookCloseRange by snippet("entity.activity.look_close.range", 10.0)
 private val playerLookCloseSmoothingTime by snippet(
@@ -54,20 +56,13 @@ class LookCloseActivity(
     }
 
     private fun findNewTarget(context: ActivityContext): Target? {
-        val closestTarget = context.viewers
-            .filter { it.isLookable }
-            .minByOrNull { currentPosition.distanceSquared(it.location) ?: Double.POSITIVE_INFINITY }
-
-        if (closestTarget == null) {
-            return null
-        }
-        val distance = currentPosition.distanceSquared(closestTarget.location)
-
-        if (distance == null || distance > playerLookCloseRange * playerLookCloseRange) {
-            return null
-        }
-
-        return Target(closestTarget)
+        val closestTarget = context.viewers.mapNotNull { player ->
+            player.viewerSnapshot?.takeIf { it.isLookable }?.let { player.uniqueId to it }
+        }.minByOrNull { currentPosition.distanceSquared(it.second.position) ?: Double.POSITIVE_INFINITY }
+            ?: return null
+        val distance = currentPosition.distanceSquared(closestTarget.second.position) ?: return null
+        if (distance > playerLookCloseRange * playerLookCloseRange) return null
+        return Target(closestTarget.first)
     }
 
     override fun tick(context: ActivityContext): TickResult {
@@ -108,7 +103,8 @@ class LookCloseActivity(
         this.target = target
 
         val npcEyePosition = currentPosition.add(y = context.entityState.eyeHeight)
-        val direction = target.eyePosition.toVector().minus(npcEyePosition).normalize()
+        val eyePosition = target.snapshot?.eyePosition ?: return TickResult.IGNORED
+        val direction = eyePosition.toVector().minus(npcEyePosition).normalize()
 
         val targetYaw = getLookYaw(direction.x, direction.z)
         val targetPitch = getLookPitch(direction.x, direction.y, direction.z)
@@ -131,20 +127,16 @@ class LookCloseActivity(
         pitchVelocity.value = 0f
     }
 
-    inner class Target(val player: Player, private val lookupTime: Long = System.currentTimeMillis()) {
+    inner class Target(val playerId: UUID, private val lookupTime: Long = System.currentTimeMillis()) {
+        val snapshot get() = ViewerSnapshots[playerId]
         val shouldRefresh: Boolean
             get() {
-                if (!player.isValid) return true
-                val distanceSquared = this@Target.position.distanceSquared(player.location.toProperty()) ?: return true
-                if (distanceSquared > playerLookCloseRange * playerLookCloseRange) return true
-                return System.currentTimeMillis() - lookupTime > 1000
+                val viewer = snapshot ?: return true
+                if (!viewer.isLookable) return true
+                val distance = currentPosition.distanceSquared(viewer.position) ?: return true
+                return distance > playerLookCloseRange * playerLookCloseRange ||
+                    System.currentTimeMillis() - lookupTime > 1000
             }
-
-        val position: PositionProperty
-            get() = player.location.toProperty()
-
-        val eyePosition: PositionProperty
-            get() = player.eyeLocation.toProperty()
     }
 
 }

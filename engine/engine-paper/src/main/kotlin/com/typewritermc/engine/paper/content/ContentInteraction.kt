@@ -1,9 +1,13 @@
 package com.typewritermc.engine.paper.content
 
+import com.typewritermc.engine.paper.utils.entityDispatcher
+
 import com.github.retrooper.packetevents.event.PacketReceiveEvent
 import com.github.retrooper.packetevents.protocol.packettype.PacketType
 import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientCreativeInventoryAction
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerSetSlot
+import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerWindowItems
+import com.github.retrooper.packetevents.protocol.item.ItemStack as PacketItem
 import com.typewritermc.core.interaction.Interaction
 import com.typewritermc.core.interaction.InteractionContext
 import com.typewritermc.core.utils.failure
@@ -23,7 +27,6 @@ import com.typewritermc.engine.paper.plugin
 import com.typewritermc.engine.paper.utils.Sync
 import com.typewritermc.engine.paper.utils.msg
 import com.typewritermc.engine.paper.utils.playSound
-import io.github.retrooper.packetevents.util.SpigotReflectionUtil
 import kotlinx.coroutines.Dispatchers
 import lirand.api.extensions.events.unregister
 import lirand.api.extensions.server.registerEvents
@@ -52,7 +55,8 @@ class ContentInteraction(
 
     @Volatile
     private var items = emptyMap<Int, IntractableItem>()
-    private val cachedOriginalItems = mutableMapOf<Int, ItemStack>()
+    @Volatile private var packetItems = emptyMap<Int, PacketItem>()
+    @Volatile private var containerLayout: Pair<Int, Int>? = null
     private var lastHandledDropTick = Int.MIN_VALUE
     private var creativeGuard: InterceptionBundle? = null
 
@@ -64,7 +68,7 @@ class ContentInteraction(
 
     override suspend fun initialize(): Result<Unit> {
         player.playSound("block.beacon.activate")
-        Dispatchers.Sync.switchContext {
+        player.entityDispatcher.switchContext {
             ContentEditorStartEvent(player).callEvent()
         }
         val mode = mode ?: return failure("No content mode found")
@@ -78,6 +82,23 @@ class ContentInteraction(
         plugin.registerEvents(this)
         creativeGuard = player.interceptPackets {
             PacketType.Play.Client.CREATIVE_INVENTORY_ACTION { event -> guardCreativeAction(event) }
+            PacketType.Play.Server.OPEN_WINDOW { containerLayout = null }
+            PacketType.Play.Server.CLOSE_WINDOW { containerLayout = null }
+            PacketType.Play.Server.WINDOW_ITEMS { event ->
+                val packet = WrapperPlayServerWindowItems(event)
+                if (packet.windowId > 0 && packet.items.size >= 36) {
+                    containerLayout = packet.windowId to (packet.items.size - 36)
+                }
+                val tools = packetItems
+                packet.items = packet.items.mapIndexed { slot, original ->
+                    packetInventorySlot(packet.windowId, slot)?.let { tools[it]?.copy() } ?: original
+                }
+            }
+            PacketType.Play.Server.SET_SLOT { event ->
+                val packet = WrapperPlayServerSetSlot(event)
+                val slot = packetInventorySlot(packet.windowId, packet.slot) ?: return@SET_SLOT
+                packetItems[slot]?.let { packet.item = it.copy() }
+            }
         }
         return ok(Unit)
     }
@@ -88,22 +109,33 @@ class ContentInteraction(
     }
 
     private suspend fun applyInventory() {
-        val previousSlots = items.keys
-        items = mode?.items() ?: emptyMap()
-        val currentSlots = items.keys
-        val newSlots = currentSlots - previousSlots
-        val removedSlots = previousSlots - currentSlots
-        Dispatchers.Sync.switchContext {
-            newSlots.forEach { slot ->
-                val originalItem = player.inventory.getItem(slot) ?: ItemStack.empty()
-                cachedOriginalItems.putIfAbsent(slot, originalItem)
-            }
-            items.forEach { (slot, item) ->
-                player.inventory.setItem(slot, item.item)
-            }
+        player.entityDispatcher.switchContext {
+            val previous = packetItems
+            items = (mode?.items() ?: emptyMap()).filterKeys { it in 0..40 }.toMap()
+            val next = items.mapValues { (_, item) -> inventoryPacketItem(item.item.clone()) }
+            packetItems = next
+            val removedSlots = previous.keys - next.keys
             removedSlots.forEach { slot ->
-                val originalItem = cachedOriginalItems.remove(slot)
-                player.inventory.setItem(slot, originalItem)
+                val original = player.inventory.getItem(slot) ?: ItemStack.empty()
+                WrapperPlayServerSetSlot(PLAYER_INVENTORY_WINDOW_ID, 0, slot,
+                    inventoryPacketItem(original)) sendPacketTo player
+            }
+            next.forEach { (slot, item) ->
+                if (previous[slot] != item) {
+                    WrapperPlayServerSetSlot(PLAYER_INVENTORY_WINDOW_ID, 0, slot, item.copy()) sendPacketTo player
+                }
+            }
+        }
+    }
+
+    private fun packetInventorySlot(windowId: Int, slot: Int): Int? = when (windowId) {
+        PLAYER_INVENTORY_WINDOW_ID -> slot.takeIf { it in 0..40 }
+        0 -> creativeSlotToInventorySlot(slot)
+        else -> containerLayout?.takeIf { it.first == windowId }?.let { (_, offset) ->
+            when (val index = slot - offset) {
+                in 0..26 -> index + 9
+                in 27..35 -> index - 27
+                else -> null
             }
         }
     }
@@ -150,11 +182,11 @@ class ContentInteraction(
         unregister()
         creativeGuard?.cancel()
         creativeGuard = null
-        Dispatchers.Sync.switchContext {
-            cachedOriginalItems.forEach { (slot, item) ->
-                player.inventory.setItem(slot, item)
-            }
-            cachedOriginalItems.clear()
+        packetItems = emptyMap()
+        items = emptyMap()
+        containerLayout = null
+        player.entityDispatcher.switchContext {
+            player.updateInventory()
             val cache = stack.toList()
             stack.clear()
             cache.forEach { it.dispose() }
@@ -171,30 +203,28 @@ class ContentInteraction(
      * keeps the server side intact and the client is sent the truth for the slot it
      * touched.
      *
-     * Both directions have to be covered. An edit landing on a slot the editor owns would
-     * take a content item away, and an edit carrying a content item towards any other slot
-     * or towards the ground would leave a second copy behind once the editor writes its
-     * own slot back.
+     * Tools only exist in outgoing packets. Refusing writes into their slots protects the real
+     * items underneath; refusing copies of a tool prevents creative clients materializing it.
      *
      * Runs on a netty thread, so nothing here may touch the inventory directly.
      */
     private fun guardCreativeAction(event: PacketReceiveEvent) {
-        val contentItems = items
+        val contentItems = packetItems
         if (contentItems.isEmpty()) return
 
         val packet = WrapperPlayClientCreativeInventoryAction(event)
         val ownedSlot = creativeSlotToInventorySlot(packet.slot)?.takeIf { it in contentItems }
         if (ownedSlot != null) {
             event.isCancelled = true
-            val item = SpigotReflectionUtil.decodeBukkitItemStack(contentItems.getValue(ownedSlot).item)
+            val item = contentItems.getValue(ownedSlot).copy()
             WrapperPlayServerSetSlot(PLAYER_INVENTORY_WINDOW_ID, 0, ownedSlot, item) sendPacketTo player
             return
         }
 
-        val written: ItemStack = SpigotReflectionUtil.encodeBukkitItemStack(packet.itemStack) ?: return
-        if (contentItems.values.none { it.item.isSimilar(written) }) return
+        val written = packet.itemStack
+        if (contentItems.values.none { PacketItem.isSameItemSameComponents(it, written) }) return
         event.isCancelled = true
-        Bukkit.getScheduler().runTask(plugin, Runnable { player.updateInventory() })
+        com.typewritermc.engine.paper.utils.foliaScheduler.atEntity(player, { player.updateInventory() }, null, 1L)
     }
 
     @EventHandler
@@ -264,23 +294,6 @@ class ContentInteraction(
         event.isCancelled = true
     }
 
-    /**
-     * Keeps the editor's own tools out of the death drops. They are not the player's items:
-     * the real contents of those slots are held for them and handed back on exit, so dropping
-     * the tools would scatter barrier blocks and editor wands on the ground for anyone.
-     *
-     * One drop per tool, matched on the whole stack, so a mode handing out a plain item takes
-     * only its own copy and leaves the player's with them.
-     */
-    @EventHandler
-    fun onDeath(event: PlayerDeathEvent) {
-        if (event.entity != player) return
-        for (item in items.values) {
-            val index = event.drops.indexOfFirst { it.isSimilar(item.item) && it.amount == item.item.amount }
-            if (index < 0) continue
-            event.drops.removeAt(index)
-        }
-    }
 }
 
 private val Player.contentInteraction: ContentInteraction?

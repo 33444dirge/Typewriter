@@ -5,6 +5,9 @@ import com.typewritermc.core.utils.point.Position
 import com.typewritermc.roadnetwork.RoadNetworkEntry
 import org.bukkit.entity.Player
 import java.time.Duration
+import com.typewritermc.core.utils.UntickedAsync
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 class LinePathStreamProducer(
     player: Player,
@@ -37,7 +40,7 @@ class LinePathStreamProducer(
     )
 
     override suspend fun refreshPath(): PathStream? {
-        val (_, paths) = calculatePathing() ?: return null
+        val (_, paths) = withContext(Dispatchers.UntickedAsync) { calculatePathing() } ?: return null
         val line = paths.flatten()
         if (line.isEmpty()) return null
         return LinePathStream(displaySupplier(player), line, speed)

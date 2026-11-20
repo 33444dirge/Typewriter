@@ -11,6 +11,11 @@ import kotlin.random.Random
 import kotlin.reflect.KClass
 import kotlin.reflect.safeCast
 
+/** Releases connection resources before a disconnected owner's coroutine can retire. */
+interface RetirableInteraction {
+    fun retire()
+}
+
 interface Interaction {
     val priority: Int
     val context: InteractionContext

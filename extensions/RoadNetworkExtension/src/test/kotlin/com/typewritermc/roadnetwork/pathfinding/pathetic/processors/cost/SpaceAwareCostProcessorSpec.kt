@@ -2,33 +2,39 @@ package com.typewritermc.roadnetwork.pathfinding.pathetic.processors.cost
 
 import de.bsommerfeld.pathetic.api.pathing.processing.context.EvaluationContext
 import de.bsommerfeld.pathetic.api.wrapper.PathPosition
-import de.bsommerfeld.pathetic.bukkit.context.BukkitEnvironmentContext
+import com.typewritermc.roadnetwork.pathfinding.pathetic.SnapshotEnvironmentContext
+import com.typewritermc.engine.paper.utils.BlockView
+import com.typewritermc.engine.paper.utils.BlockSnapshot
+import com.typewritermc.engine.paper.utils.BlockCoordinate
+import org.bukkit.util.BoundingBox
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.doubles.shouldBeGreaterThan
 import io.kotest.matchers.shouldBe
 import io.mockk.every
 import io.mockk.mockk
 import org.bukkit.Material
-import org.mockbukkit.mockbukkit.MockBukkit
-import org.mockbukkit.mockbukkit.ServerMock
-import org.mockbukkit.mockbukkit.world.WorldMock
 
 class SpaceAwareCostProcessorSpec : FunSpec() {
-    private lateinit var server: ServerMock
-    private lateinit var world: WorldMock
+    private val walls = mutableSetOf<BlockCoordinate>()
+    private val world = BlockView { x, y, z ->
+        if (BlockCoordinate(x, y, z) in walls) {
+            BlockSnapshot(x, y, z, Material.STONE, true, false, false, null,
+                listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0)))
+        } else BlockSnapshot.empty(x, y, z)
+    }
 
     private val processor = SpaceAwareCostProcessor(entityHeight = 1.8)
 
     private fun contextAt(x: Int, y: Int, z: Int): EvaluationContext {
         val context = mockk<EvaluationContext>()
         every { context.currentPathPosition } returns PathPosition(x.toDouble(), y.toDouble(), z.toDouble())
-        every { context.environmentContext } returns BukkitEnvironmentContext(world)
+        every { context.environmentContext } returns SnapshotEnvironmentContext(world)
         return context
     }
 
     private fun placeWall(x: Int, z: Int, baseY: Int = 64, height: Int = 3) {
         repeat(height) { offset ->
-            world.getBlockAt(x, baseY + offset, z).type = Material.STONE
+            walls.add(BlockCoordinate(x, baseY + offset, z))
         }
     }
 
@@ -37,12 +43,7 @@ class SpaceAwareCostProcessorSpec : FunSpec() {
 
     init {
         beforeTest {
-            server = MockBukkit.mock()
-            world = server.addSimpleWorld("space-aware-world")
-        }
-
-        afterTest {
-            MockBukkit.unmock()
+            walls.clear()
         }
 
         test("open space with no walls costs nothing") {

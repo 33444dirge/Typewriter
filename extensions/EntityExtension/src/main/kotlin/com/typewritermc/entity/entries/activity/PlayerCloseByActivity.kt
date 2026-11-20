@@ -1,5 +1,7 @@
 package com.typewritermc.entity.entries.activity
 
+import com.typewritermc.engine.paper.entry.entity.viewerSnapshot
+
 import com.typewritermc.core.books.pages.Colors
 import com.typewritermc.core.entries.Ref
 import com.typewritermc.core.entries.emptyRef
@@ -89,23 +91,15 @@ class PlayerCloseByActivity(
     private var trackers = mutableMapOf<UUID, PlayerLocationTracker>()
 
     override fun currentChild(context: ActivityContext): Ref<out EntityActivityEntry> {
-        val closeByPlayers = context.viewers
-            .filter { it.isLookable }
-            .filter {
-                (it.location.toProperty().distanceSquared(currentPosition)
-                    ?: Double.MAX_VALUE) < deactivationRange * deactivationRange
-            }
-
-        trackers.keys.removeAll { uuid -> closeByPlayers.none { it.uniqueId == uuid } }
-
-        closeByPlayers.forEach { player ->
-            trackers.computeIfAbsent(player.uniqueId) {
-                PlayerLocationTracker(
-                    player.location.toProperty()
-                )
-            }
-                .update(player.location.toProperty())
-                .updateActivated(currentPosition, activationRange)
+        val closeByPlayers = context.viewers.mapNotNull { player ->
+            player.viewerSnapshot?.takeIf { it.isLookable }?.let { player.uniqueId to it.position }
+        }.filter { (_, position) ->
+            (position.distanceSquared(currentPosition) ?: Double.MAX_VALUE) < deactivationRange * deactivationRange
+        }
+        trackers.keys.removeAll { uuid -> closeByPlayers.none { it.first == uuid } }
+        closeByPlayers.forEach { (playerId, position) ->
+            trackers.computeIfAbsent(playerId) { PlayerLocationTracker(position) }
+                .update(position).updateActivated(currentPosition, activationRange)
         }
 
         val isActive = trackers.any { it.value.isActive(maxIdleDuration) }
