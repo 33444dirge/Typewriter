@@ -14,6 +14,8 @@ import com.typewritermc.roadnetwork.gps.GPS
 import com.typewritermc.roadnetwork.gps.GPSEdge
 import com.typewritermc.roadnetwork.gps.findPathBetweenPosition
 import com.typewritermc.roadnetwork.pathfinding.pathetic.PathCalculationResult
+import com.typewritermc.roadnetwork.pathfinding.pathetic.processors.NodeClearance
+import com.typewritermc.roadnetwork.pathfinding.pathetic.processors.SidestepInfo
 import de.bsommerfeld.pathetic.api.pathing.result.Path
 import de.bsommerfeld.pathetic.api.wrapper.PathPosition
 import kotlinx.coroutines.Dispatchers
@@ -216,6 +218,7 @@ sealed interface NavigationActivityTaskState {
             private const val MIN_DISTANCE_SQUARED = 0.001
 
             private const val PASS_NODE_RADIUS_SQUARED = 1.0
+            private const val ARRIVAL_RADIUS_SQUARED = 0.15 * 0.15
 
             private const val JUMP_DISTANCE_THRESHOLD = 2.4
             private const val JUMP_SPEED_DIVISOR = 0.2085
@@ -239,6 +242,9 @@ sealed interface NavigationActivityTaskState {
 
         @Volatile
         private var patheticPath: Path? = null
+
+        @Volatile
+        private var sidesteps: List<SidestepInfo?> = emptyList()
         private var pathIndex: Int = 0
         private var pathCalculationJob: Job? = null
 
@@ -277,18 +283,33 @@ sealed interface NavigationActivityTaskState {
                 allowFallback = true,
             )
 
-            when (result) {
-                is PathCalculationResult.Success -> {
-                    patheticPath = result.path
-                    pathIndex = 0
-                    pathIsFallback = result.isFallback
-                }
+                when (result) {
+                    is PathCalculationResult.Success -> {
+                        sidesteps = sidestepsAlong(result.path)
+                        patheticPath = result.path
+                        pathIndex = 0
+                        pathIsFallback = result.isFallback
+                    }
 
                 is PathCalculationResult.Failure -> {
                     patheticPath = null
                     pathCalculationFailed = true
                     logger.warning("Failed to calculate path for edge ending at ${edge.end} starting from ${location.toPosition()}. Try to recalculate the road network edges.")
                 }
+            }
+        }
+
+        private suspend fun sidestepsAlong(path: Path): List<SidestepInfo?> {
+            val snapshots = BlockSnapshots.create(location.toBukkitLocation(), navigationSnapshotLimit)
+            val clearance = NodeClearance(snapshots, capabilities)
+            val nodes = path.toList()
+            while (true) {
+                currentCoroutineContext().ensureActive()
+                val offsets = nodes.mapIndexed { index, node ->
+                    nodes.getOrNull(index - 1)?.let { previous -> clearance.sidestep(node, previous) }
+                }
+                if (!snapshots.hasMissing) return offsets
+                snapshots.loadMissing()
             }
         }
 
@@ -407,23 +428,26 @@ sealed interface NavigationActivityTaskState {
                 return
             }
 
-            val targetNode = currentPath.elementAtOrNull(pathIndex) ?: return
-            moveTo(nodeTarget(targetNode, world))
+            moveTo(nodeTarget(currentPath, pathIndex, world) ?: return)
         }
 
         private fun advancePastReachedNodes(currentPath: Path, world: BlockView) {
             if (!isOnGround()) return
             while (pathIndex < currentPath.length()) {
-                val node = currentPath.elementAtOrNull(pathIndex) ?: return
+                val target = nodeTarget(currentPath, pathIndex, world) ?: return
                 val isLastNode = pathIndex == currentPath.length() - 1
+                val requiresArrival = isLastNode || sidesteps.getOrNull(pathIndex) != null
                 val canAdvance = canAdvancePastNode(
                     location,
-                    nodeTarget(node, world),
-                    isLastNode,
+                    target,
+                    requiresArrival,
                     capabilities.maxStepHeight,
-                    nearNodeRadius,
+                    ARRIVAL_RADIUS_SQUARED,
                     PASS_NODE_RADIUS_SQUARED,
-                )
+                ) {
+                    val following = nodeTarget(currentPath, pathIndex + 1, world)
+                    following != null && canWalkStraightTo(following, world)
+                }
                 if (!canAdvance) return
 
                 pathIndex++
@@ -431,20 +455,38 @@ sealed interface NavigationActivityTaskState {
             }
         }
 
-        private fun nodeTarget(node: PathPosition, world: BlockView): PositionProperty {
+        private fun nodeTarget(path: Path, index: Int, world: BlockView): PositionProperty? {
+            val node = path.elementAtOrNull(index) ?: return null
             val bukkitLocation = org.bukkit.Location(null, node.x, node.y, node.z)
             val centered = bukkitLocation.toCenterLocation()
+            val sidestep = sidesteps.getOrNull(index)
+            val sidestepX = sidestep?.let { it.direction.x * it.distance } ?: 0.0
+            val sidestepZ = sidestep?.let { it.direction.z * it.distance } ?: 0.0
             val surfaceY = computeSurfaceY(
                 world, bukkitLocation.blockX, bukkitLocation.blockY, bukkitLocation.blockZ
             )
             return PositionProperty(
                 location.world,
-                centered.x,
+                centered.x + sidestepX,
                 surfaceY,
-                centered.z,
+                centered.z + sidestepZ,
                 location.yaw,
                 location.pitch
             )
+        }
+
+        private fun canWalkStraightTo(target: PositionProperty, world: BlockView): Boolean =
+            isHorizontalMoveClear(target.x - location.x, target.z - location.z, world)
+
+        private fun isHorizontalMoveClear(deltaX: Double, deltaZ: Double, world: BlockView): Boolean {
+            val horizontalDelta = Vector(deltaX, 0.0, deltaZ)
+            val result = blockCollision.handlePhysics(
+                boundingBox(),
+                horizontalDelta,
+                location,
+                BukkitBlockGetter(world),
+            )
+            return !result.collisionX && !result.collisionZ
         }
 
         private fun checkStuckState() {
@@ -491,30 +533,17 @@ sealed interface NavigationActivityTaskState {
             }
 
             pathIndex++
-            val nextNode = currentPath.elementAtOrNull(pathIndex) ?: run {
+            val nextTarget = nodeTarget(currentPath, pathIndex, blockView) ?: run {
                 logger.warning("Cannot retrieve next path node at index $pathIndex")
                 return
             }
 
-            val nextLocation = org.bukkit.Location(null, nextNode.x, nextNode.y, nextNode.z)
-            val nextSurfaceY = computeSurfaceY(
-                blockView,
-                nextLocation.blockX, nextLocation.blockY, nextLocation.blockZ
-            )
-
-            location = PositionProperty(
-                world = location.world,
-                x = nextLocation.toCenterLocation().x,
-                y = nextSurfaceY,
-                z = nextLocation.toCenterLocation().z,
-                yaw = location.yaw,
-                pitch = location.pitch
-            )
+            location = nextTarget
 
             velocity = Vector.ZERO
             resetStuckState()
 
-            logger.warning("Entity was stuck for $stuckThreshold ticks at $location for node $currentNode, teleported to next node at (${nextLocation.blockX}, ${nextLocation.blockY}, ${nextLocation.blockZ})")
+            logger.warning("Entity was stuck for $stuckThreshold ticks at $location for node $currentNode, teleported to next node at (${nextTarget.x}, ${nextTarget.y}, ${nextTarget.z})")
         }
 
         private fun resetStuckState() {
@@ -570,10 +599,14 @@ sealed interface NavigationActivityTaskState {
                 Vector(0.0, -0.1, 0.0)
             } else Vector.ZERO
 
-            var newVelocity = velocity + gravityVelocity
-            newVelocity = Vector(targetVelocity.x, newVelocity.y, targetVelocity.z)
+            val verticalVelocity = (velocity + gravityVelocity).y
+            val isRising = dy > 0 && velocity.y > 0
+            val world = blockView
+            if (isRising && !isHorizontalMoveClear(targetVelocity.x, targetVelocity.z, world)) {
+                return Vector(0.0, verticalVelocity, 0.0)
+            }
 
-            return newVelocity
+            return Vector(targetVelocity.x, verticalVelocity, targetVelocity.z)
         }
 
         private fun stepHeightToTarget(target: PositionProperty): Double {
@@ -618,6 +651,9 @@ sealed interface NavigationActivityTaskState {
                 jumpVelZ = 0.0
             }
 
+            if (!isHorizontalMoveClear(jumpVelX, jumpVelZ, blockView)) {
+                return Vector(0.0, capabilities.jumpStrength, 0.0)
+            }
             return Vector(jumpVelX, capabilities.jumpStrength, jumpVelZ)
         }
 
@@ -663,15 +699,8 @@ sealed interface NavigationActivityTaskState {
                 min(pathIndex + rotationLookAhead, currentPath.length() - 1)
             }
 
-            val targetNode = currentPath.elementAtOrNull(lookAheadIndex) ?: return null
-            val targetBukkitLoc = org.bukkit.Location(null, targetNode.x, targetNode.y, targetNode.z)
-            val targetLocation = targetBukkitLoc.toCenterLocation()
-            val targetSurfaceY = computeSurfaceY(
-                world,
-                targetBukkitLoc.blockX, targetBukkitLoc.blockY, targetBukkitLoc.blockZ
-            )
-
-            return Vector(targetLocation.x, targetSurfaceY, targetLocation.z)
+            val target = nodeTarget(currentPath, lookAheadIndex, world) ?: return null
+            return Vector(target.x, target.y, target.z)
         }
 
         private fun hasDirectionConflict(): Boolean {

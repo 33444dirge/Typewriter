@@ -93,11 +93,16 @@ class PlayerEntity(
 
     private var entity: WrapperPlayer
 
+    private val nameClaim: Pair<UUID, String>?
+
     override val identity: EntityIdentity
         get() = EntityIdentity(entity.entityId, entity.uuid)
 
     override val state: EntityState
         get() = entity.entityType.state(properties)
+
+    override val scoreboardMember: String
+        get() = entity.username
 
     init {
         val uuid = stableId?.let { claimProfile(player.uniqueId, it) } ?: UUID.randomUUID()
@@ -106,8 +111,10 @@ class PlayerEntity(
             entityId = EntityLib.getPlatform().entityIdProvider.provide(uuid, EntityTypes.PLAYER)
         } while (EntityLib.getApi<SpigotEntityLibAPI>().getEntity(entityId) != null)
 
-        entity =
-            WrapperPlayer(UserProfile(uuid, "\u2063${displayName.get(player).stripped().replace(" ", "_")}"), entityId)
+        val baseName = displayName.get(player).stripped().replace(" ", "_")
+        nameClaim = claimName(player.uniqueId, baseName)
+        val name = nameClaim?.second ?: profileName(baseName, MAX_PROFILE_NAME_LENGTH - 1)
+        entity = WrapperPlayer(UserProfile(uuid, name), entityId)
 
         entity.isInTablist = false
         entity.meta<PlayerMeta> {
@@ -170,7 +177,7 @@ class PlayerEntity(
             "typewriter-$entityId",
             WrapperPlayServerTeams.TeamMode.CREATE,
             info,
-            entity.username.take(16)
+            scoreboardMember
         ) sendPacketTo player
 
         super.spawn(location)
@@ -212,11 +219,36 @@ class PlayerEntity(
         rideableSitting.retireResources()
         entity.releaseWithoutViewer()
         claimedProfiles -= entity.uuid
+        nameClaim?.let { claimedNames -= it }
         super.retireResources()
     }
 
     companion object {
         private val claimedProfiles = ConcurrentHashMap.newKeySet<UUID>()
+        private val claimedNames = ConcurrentHashMap.newKeySet<Pair<UUID, String>>()
+
+        /** The longest profile name a client decodes. */
+        private const val MAX_PROFILE_NAME_LENGTH = 16
+
+        /**
+         * Claims the profile name [viewer] is shown an npc called [displayName] under, until that npc is disposed.
+         *
+         * A client scoreboard lists a player by profile name, so two npcs of the same name shown to one viewer
+         * would share every team either of them is put in. Each copy gets zero width characters behind the
+         * leading marker until its name is unique, which the vanilla font draws as nothing. They go in front of
+         * the display name so the cut to the client's length limit cannot remove them. Once the display name is
+         * cut away entirely the names run out, and null tells the caller to share the last one without a claim.
+         */
+        private fun claimName(viewer: UUID, displayName: String): Pair<UUID, String>? {
+            for (copies in 0 until MAX_PROFILE_NAME_LENGTH) {
+                val claim = viewer to profileName(displayName, copies)
+                if (claimedNames.add(claim)) return claim
+            }
+            return null
+        }
+
+        private fun profileName(displayName: String, copies: Int): String =
+            ("\u2063" + "\u200c".repeat(copies) + displayName).take(MAX_PROFILE_NAME_LENGTH)
 
         /**
          * The profile [viewer] is shown an npc named [stableId] under, held until that npc is disposed.

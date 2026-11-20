@@ -15,8 +15,7 @@ import de.bsommerfeld.pathetic.api.pathing.processing.ValidationProcessor
 import de.bsommerfeld.pathetic.api.pathing.processing.context.EvaluationContext
 import de.bsommerfeld.pathetic.api.wrapper.PathPosition
 import com.typewritermc.roadnetwork.pathfinding.pathetic.SnapshotEnvironmentContext
-import org.bukkit.Location
-import org.bukkit.World
+import com.typewritermc.engine.paper.utils.BlockView
 import com.typewritermc.engine.paper.utils.BlockSnapshot
 import org.bukkit.block.data.Openable
 import org.bukkit.util.BoundingBox
@@ -40,6 +39,7 @@ class ReachabilityProcessor(
     companion object {
         private const val MIN_VELOCITY_THRESHOLD = 0.0001
         private const val STEP_DETECTION_THRESHOLD = 0.05
+        private const val JUMP_LANDING_CLEARANCE = 0.01
     }
 
     override fun isValid(context: EvaluationContext): Boolean {
@@ -170,16 +170,10 @@ class ReachabilityProcessor(
         val deltaY = currentGroundY - parentGroundY
         val isJump = deltaY > capabilities.maxStepHeight
 
-        val startY = if (isJump) {
-            parentGroundY + capabilities.maxStepHeight
-        } else {
-            parentGroundY
-        }
-
         val startPosition = PositionProperty(
             com.typewritermc.core.utils.point.World((context.environmentContext as SnapshotEnvironmentContext).worldId),
             parentPos.x + 0.5,
-            startY,
+            parentGroundY,
             parentPos.z + 0.5,
             0f, 0f,
         )
@@ -205,15 +199,34 @@ class ReachabilityProcessor(
 
         if (velocity.lengthSquared < MIN_VELOCITY_THRESHOLD) return true
 
-        return performCollisionCheck(velocity, startPosition, world, currentGroundY, isJump, sidestepInfo)
+        if (isJump) return isJumpClear(velocity, startPosition, world)
+        return performCollisionCheck(velocity, startPosition, world, currentGroundY, sidestepInfo)
+    }
+
+    /**
+     * A walking entity jumps by rising straight up until its feet clear the landing height and only then
+     * moving across, so the jump is checked in those two parts. Checking one diagonal sweep would hit the
+     * side of the landing block itself.
+     */
+    private fun isJumpClear(velocity: Vector, startPosition: PositionProperty, world: BlockView): Boolean {
+        val relativeEntityBox = createRelativeEntityBoundingBox()
+        val blockGetter = BukkitBlockGetter(world)
+
+        val rise = Vector(0.0, velocity.y + JUMP_LANDING_CLEARANCE, 0.0)
+        val riseResult = blockCollision.handlePhysics(relativeEntityBox, rise, startPosition, blockGetter, null, false)
+        if (riseResult.collisionY) return false
+
+        val across = Vector(velocity.x, 0.0, velocity.z)
+        val acrossResult =
+            blockCollision.handlePhysics(relativeEntityBox, across, riseResult.newPosition, blockGetter, null, false)
+        return !acrossResult.collisionX && !acrossResult.collisionZ
     }
 
     private fun performCollisionCheck(
         velocity: Vector,
         startPosition: PositionProperty,
-        world: com.typewritermc.engine.paper.utils.BlockView,
+        world: BlockView,
         currentGroundY: Double,
-        isJump: Boolean,
         sidestepInfo: SidestepInfo? = null
     ): Boolean {
         val relativeEntityBox = createRelativeEntityBoundingBox()
@@ -222,15 +235,12 @@ class ReachabilityProcessor(
 
         return when {
             velocity.y < 0 -> handleFallCollision(result)
-            isJump -> handleJumpCollision(result)
             else -> handleStepOrFlatMovement(result, velocity, startPosition, currentGroundY, blockGetter, sidestepInfo)
         }
     }
 
     private fun handleFallCollision(result: PhysicsResult): Boolean =
         result.collisionY && !result.collisionX && !result.collisionZ
-
-    private fun handleJumpCollision(result: PhysicsResult): Boolean = !result.collisionY
 
     private fun handleStepOrFlatMovement(
         result: PhysicsResult,
@@ -294,7 +304,7 @@ class ReachabilityProcessor(
         if (properties?.let { isPassable(it) } == true) return true
 
         val world = (context.environmentContext as? SnapshotEnvironmentContext)?.world ?: return false
-        val block = world.getBlockAt(pos.flooredX, pos.flooredY, pos.flooredZ)
+        val block = world.getBlockAt(pos.x.toInt(), pos.y.toInt(), pos.z.toInt())
         return isEntityCenterFreeOfCollision(block)
     }
 
@@ -315,7 +325,7 @@ class ReachabilityProcessor(
                 properties.contains(PathNodeProperty.OPEN)
 
     private fun isBlockPassable(block: BlockSnapshot): Boolean =
-        !block.isSolid || (block.blockData is Openable && capabilities.canInteract) || (block.blockData is Openable && (block.blockData as Openable).isOpen)
+        !block.type.isSolid || (block.blockData is Openable && capabilities.canInteract) || (block.blockData is Openable && (block.blockData as Openable).isOpen)
 
     private fun createRelativeEntityBoundingBox(): BoundingBox {
         val halfWidth = capabilities.width / 2.0

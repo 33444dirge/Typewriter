@@ -15,6 +15,8 @@ import com.typewritermc.engine.paper.utils.foliaScheduler
 import org.bukkit.event.Listener
 import org.koin.java.KoinJavaComponent.get
 import java.util.*
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -72,6 +74,8 @@ enum class AudienceDisplayState(val displayName: String, val color: String) {
     ;
 }
 
+private val membershipLock = ReentrantLock()
+
 abstract class AudienceDisplay : Listener {
     @Volatile
     var isActive = false
@@ -110,12 +114,14 @@ abstract class AudienceDisplay : Listener {
             foliaScheduler.atEntity(player, { addPlayer(player) }, null, 1L)
             return
         }
-        synchronized(lifecycle) {
-            if (closed.get() || player.uniqueId in memberIds) return
-            if (!isActive) initialize()
-            memberIds.add(player.uniqueId)
+        membershipLock.withLock {
+            synchronized(lifecycle) {
+                if (closed.get() || player.uniqueId in memberIds) return
+                if (!isActive) initialize()
+                memberIds.add(player.uniqueId)
+            }
+            onPlayerAdd(player)
         }
-        onPlayerAdd(player)
     }
 
     fun removePlayer(player: Player) {
@@ -124,10 +130,12 @@ abstract class AudienceDisplay : Listener {
             foliaScheduler.atEntity(player, { removePlayer(player) }, { memberIds.remove(player.uniqueId) }, 1L)
             return
         }
-        if (!memberIds.remove(player.uniqueId)) return
-        onPlayerRemove(player)
-        synchronized(lifecycle) {
-            if (memberIds.isEmpty() && isActive) dispose()
+        membershipLock.withLock {
+            if (!memberIds.remove(player.uniqueId)) return
+            onPlayerRemove(player)
+            synchronized(lifecycle) {
+                if (memberIds.isEmpty() && isActive) dispose()
+            }
         }
     }
 
@@ -230,19 +238,25 @@ abstract class AudienceFilter(
             foliaScheduler.atEntity(this, { updateFilter(isFiltered) }, null, 1L)
             return this in this@AudienceFilter
         }
-        val allow = !inverted == isFiltered && canConsider(this)
-        if (allow) {
-            if (filteredPlayers.add(uniqueId)) {
-                onPlayerFilterAdded(this)
-                get<AudienceManager>(AudienceManager::class.java).addPlayerToChildren(this, ref)
+        val passes = !inverted == isFiltered
+        val allowed = passes && canConsider(this)
+        if (allowed == (uniqueId in filteredPlayers)) return allowed
+
+        return membershipLock.withLock {
+            val allow = passes && canConsider(this)
+            if (allow) {
+                if (filteredPlayers.add(uniqueId)) {
+                    onPlayerFilterAdded(this)
+                    get<AudienceManager>(AudienceManager::class.java).addPlayerToChildren(this, ref)
+                }
+            } else {
+                if (filteredPlayers.remove(uniqueId)) {
+                    onPlayerFilterRemoved(this)
+                    get<AudienceManager>(AudienceManager::class.java).removePlayerFromChildren(this, ref)
+                }
             }
-        } else {
-            if (filteredPlayers.remove(uniqueId)) {
-                onPlayerFilterRemoved(this)
-                get<AudienceManager>(AudienceManager::class.java).removePlayerFromChildren(this, ref)
-            }
+            allow
         }
-        return allow
     }
 
     /**

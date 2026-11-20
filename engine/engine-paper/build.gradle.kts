@@ -85,8 +85,8 @@ dependencies {
     compileOnlyApi("net.kyori:adventure-text-logger-slf4j:$adventureVersion")
     compileOnlyApi("org.apache.logging.log4j:log4j-api:2.26.0")
 
-    compileOnlyApi("com.github.retrooper:packetevents-api:2.13.0")
-    compileOnlyApi("com.github.retrooper:packetevents-spigot:2.13.0")
+    compileOnlyApi("com.github.retrooper:packetevents-api:2.14.0")
+    compileOnlyApi("com.github.retrooper:packetevents-spigot:2.14.0")
 
     compileOnly(files("../../compile-libs/placeholderapi-2.12.2.jar"))
     compileOnlyApi("org.geysermc.geyser:api:2.9.5-SNAPSHOT")

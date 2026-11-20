@@ -43,9 +43,23 @@ class AudienceManager : Listener, Reloadable, KoinComponent {
 
     override suspend fun load() {
         unload()
+        index(Query.find<AudienceEntry>())
 
-        val entries = Query.find<AudienceEntry>()
+        coroutineScope = CoroutineScope(SupervisorJob(TypewriterCoroutineLifetime.parent) + Dispatchers.UntickedAsync)
 
+        for ((ref, display) in displays) {
+            if (display !is TickableDisplay) continue
+            coroutineScope?.launch {
+                loopDisplay(ref, display)
+            }
+        }
+
+        server.onlinePlayers.forEach { player ->
+            addPlayerForRoots(player)
+        }
+    }
+
+    internal suspend fun index(entries: Sequence<AudienceEntry>) {
         val parents = mutableMapOf<Ref<out AudienceEntry>, List<Ref<out AudienceFilterEntry>>>()
         entries.filterIsInstance<AudienceFilterEntry>().forEach { entry ->
             entry.children.forEach { child ->
@@ -64,19 +78,6 @@ class AudienceManager : Listener, Reloadable, KoinComponent {
             .toList()
 
         displays = entries.associate { it.ref() to it.display() }
-
-        coroutineScope = CoroutineScope(SupervisorJob(TypewriterCoroutineLifetime.parent) + Dispatchers.UntickedAsync)
-
-        for ((ref, display) in displays) {
-            if (display !is TickableDisplay) continue
-            coroutineScope?.launch {
-                loopDisplay(ref, display)
-            }
-        }
-
-        server.onlinePlayers.forEach { player ->
-            addPlayerForRoots(player)
-        }
     }
 
     private suspend fun <TD> loopDisplay(ref: Ref<out AudienceEntry>, display: TD)
