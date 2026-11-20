@@ -2,7 +2,6 @@ package com.typewritermc.roadnetwork.pathfinding.pathetic.processors
 
 import com.typewritermc.engine.paper.entry.entity.EntityPathingCapabilities
 import de.bsommerfeld.pathetic.api.wrapper.PathPosition
-import org.bukkit.World
 import com.typewritermc.engine.paper.utils.BlockView
 import com.typewritermc.engine.paper.utils.BlockSnapshot
 import org.bukkit.util.BoundingBox
@@ -29,10 +28,6 @@ class NodeClearance(
     private val world: BlockView,
     private val capabilities: EntityPathingCapabilities,
 ) {
-    constructor(world: World, capabilities: EntityPathingCapabilities) : this(
-        BlockView { x, y, z -> BlockSnapshot.capture(world.getBlockAt(x, y, z)) }, capabilities,
-    )
-
     companion object {
         private const val EPSILON = 0.1
         private const val MAX_SIDEWAYS_SHIFT = 0.5

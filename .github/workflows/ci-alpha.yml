@@ -59,7 +59,7 @@ jobs:
       #  ----------------------------------------------------------------------------------------------------
       - name: Build Extensions
         working-directory: ./extensions
-        run: ./gradlew test buildRelease --scan --stacktrace --warning-mode all
+        run: ./gradlew test buildRelease --no-configuration-cache --stacktrace --warning-mode all
 
       - name: Upload Jars as Artifacts
         uses: actions/upload-artifact@v4

@@ -145,7 +145,7 @@ Miss any one and the data silently does nothing. The parrot `tameable_data` fix 
 
 ## Verify
 
-Run from `extensions/` (`.\gradlew.bat` in PowerShell):
+Run from `extensions/` (`.\gradlew.bat` on Windows):
 
 ```bash
 ./gradlew :EntityExtension:compileKotlin

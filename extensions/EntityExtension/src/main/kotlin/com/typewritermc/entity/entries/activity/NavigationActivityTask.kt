@@ -283,13 +283,13 @@ sealed interface NavigationActivityTaskState {
                 allowFallback = true,
             )
 
-                when (result) {
-                    is PathCalculationResult.Success -> {
-                        sidesteps = sidestepsAlong(result.path)
-                        patheticPath = result.path
-                        pathIndex = 0
-                        pathIsFallback = result.isFallback
-                    }
+            when (result) {
+                is PathCalculationResult.Success -> {
+                    sidesteps = sidestepsAlong(result.path)
+                    patheticPath = result.path
+                    pathIndex = 0
+                    pathIsFallback = result.isFallback
+                }
 
                 is PathCalculationResult.Failure -> {
                     patheticPath = null

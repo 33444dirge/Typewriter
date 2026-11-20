@@ -9,11 +9,9 @@ import io.kotest.matchers.doubles.plusOrMinus
 import io.kotest.matchers.nulls.shouldBeNull
 import io.kotest.matchers.nulls.shouldNotBeNull
 import io.kotest.matchers.shouldBe
-import io.mockk.every
-import io.mockk.mockk
 import org.bukkit.Material
-import org.bukkit.World
-import org.bukkit.block.Block
+import com.typewritermc.engine.paper.utils.BlockView
+import com.typewritermc.engine.paper.utils.BlockSnapshot
 import org.bukkit.util.BoundingBox
 
 class NodeClearanceSpec : FunSpec({
@@ -21,21 +19,9 @@ class NodeClearanceSpec : FunSpec({
     val node = PathPosition(0.0, 64.0, 0.0)
     val previousAlongZ = PathPosition(0.0, 64.0, -1.0)
 
-    fun worldWith(shapes: Map<Triple<Int, Int, Int>, List<BoundingBox>>): World {
-        val world = mockk<World>()
-        every { world.getBlockAt(any<Int>(), any<Int>(), any<Int>()) } answers {
-            val x = firstArg<Int>()
-            val y = secondArg<Int>()
-            val z = thirdArg<Int>()
-            mockk<Block>(relaxed = true) {
-                every { this@mockk.x } returns x
-                every { this@mockk.y } returns y
-                every { this@mockk.z } returns z
-                every { type } returns Material.STONE
-                every { collisionShape.boundingBoxes } returns shapes[Triple(x, y, z)].orEmpty()
-            }
-        }
-        return world
+    fun worldWith(shapes: Map<Triple<Int, Int, Int>, List<BoundingBox>>): BlockView = BlockView { x, y, z ->
+        val boxes = shapes[Triple(x, y, z)].orEmpty()
+        BlockSnapshot(x, y, z, Material.STONE, boxes.isNotEmpty(), false, boxes.isEmpty(), null, boxes)
     }
 
     fun clearanceWith(vararg shapes: Pair<Triple<Int, Int, Int>, List<BoundingBox>>) =

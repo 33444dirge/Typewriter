@@ -39,5 +39,5 @@ runs:
 
       - name: Test and Build Paper Engine
         working-directory: ./engine
-        run: ./gradlew engine-paper:test engine-paper:buildRelease ${{ inputs.gradle-arguments }} --stacktrace --warning-mode all
+        run: ./gradlew engine-paper:test engine-paper:buildRelease ${{ inputs.gradle-arguments }} --no-configuration-cache --stacktrace --warning-mode all
         shell: bash

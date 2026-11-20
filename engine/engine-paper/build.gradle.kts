@@ -96,6 +96,8 @@ dependencies {
 }
 
 tasks.withType<ShadowJar> {
+    manifest.attributes["Typewriter-Upstream-Revision"] = "94ec4238d95a5a65ce54270acf036800ea302085"
+    manifest.attributes["Typewriter-JiuJiu-Revision"] = "upstream-0.9.0-20261120-1"
     manifest.attributes["Typewriter-Connection-Revision"] = "null-player-guard-20261108-1"
     manifest.attributes["Typewriter-Dialogue-Revision"] = "external-overlay-20261108-1"
     manifest.attributes["Typewriter-Dialogue-Input-Revision"] = "dialogue-input-sounds-20261108-1"

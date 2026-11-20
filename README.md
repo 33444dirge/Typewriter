@@ -1,3 +1,5 @@
+> JiuJiu / Folia 26.2 分支：已对齐 upstream develop `94ec4238`，当前 `0.9.0-jiujiu-folia26.2.1`。构建、差异和新增功能见 [UPSTREAM-JIUJIU.md](UPSTREAM-JIUJIU.md)。
+
 ![TypeWriter Logo](https://github.com/gabber235/TypeWriter/blob/develop/design/Banner/TW_Banner_Transparant.png?raw=true)
 
 [![Discord](https://img.shields.io/discord/1054708062520360960?label=discord&logo=discord&logoColor=white)](https://discord.gg/HtbKyuDDBw)

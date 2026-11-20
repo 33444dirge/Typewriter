@@ -87,7 +87,7 @@ subprojects {
         testImplementation("com.google.guava:guava:33.6.0-jre")
         testImplementation("org.yaml:snakeyaml:2.6")
         testImplementation("it.unimi.dsi:fastutil:8.5.18")
-        testImplementation("com.github.retrooper:packetevents-spigot:2.13.0")
+        testImplementation("com.github.retrooper:packetevents-spigot:2.14.0")
         testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
 
         val kotestVersion = "6.1.11"

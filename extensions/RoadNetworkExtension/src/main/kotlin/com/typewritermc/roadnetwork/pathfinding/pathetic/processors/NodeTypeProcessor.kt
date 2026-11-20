@@ -201,7 +201,7 @@ class NodeTypeProcessor(private val capabilities: EntityPathingCapabilities = En
      * A surface is considered walkable if the block is solid and provides
      * a horizontal surface that an entity can actually stand on.
      */
-    private fun isSurfaceWalkable(surfaceBlock: Block): Boolean {
+    private fun isSurfaceWalkable(surfaceBlock: BlockSnapshot): Boolean {
         return surfaceBlock.collisionShape.boundingBoxes.any { box ->
             val width = box.maxX - box.minX
             val length = box.maxZ - box.minZ
